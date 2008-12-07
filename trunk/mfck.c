@@ -29,6 +29,8 @@
 #  define free					GC_FREE
 #endif
 
+#define FUZZY_NEWLINE
+
 #define kCheck_MaxWarnCount			5
 
 #define kArray_InitialSize			32
@@ -2893,7 +2895,6 @@ int User_AskChoice(const char *question, const char *choices, char def)
     int answer = EOF;
 
     do {
-	const char *p;
 	int ch;
 
 #if 0
@@ -3166,7 +3167,7 @@ void CheckMailbox(Mailbox *mbox, bool strict, bool repair)
 		} else {
 #endif
 		if (value != NULL) {
-		    Warn("Message %s: Incorrect Content-Length: %d, "
+		    Warn("Message %s: Incorrect Content-Length: %s, "
 			 "should be %d%s",
 			 String_CString(msg->tag),
 			 String_PrettyCString(value), bodyLength,
@@ -3740,7 +3741,8 @@ void ListMessage(Stream *output, int num, int numWidth, Message *msg,
 void ListMailbox(Stream *output, Mailbox *mbox, int num, int count)
 {
     // Adjust to even page boundary with zero offset
-    int start = ((num - 1) / count) * count;
+    //int start = ((num - 1) / count) * count;
+    int start = num;
     int i = 0;
     int digits = IntLength(start + count + 1 - 1);
     Message *msg;
@@ -4029,6 +4031,16 @@ bool NoNextArg(int *pIndex, Array *args)
     return true;
 }
 
+int String_ToMessageNumber(const String *str, Mailbox *mbox)
+{
+    const String *dollar = String_FromCString("$", false);
+
+    if (String_IsEqual(str, dollar, false))
+	return Mailbox_Count(mbox);
+
+    return String_ToInteger(str, -1);
+}
+
 MessageSet *MessageSetArg(String *arg, int maxMax)
 {
     Parser parser;
@@ -4240,7 +4252,7 @@ void RunLoop(Mailbox *mbox, Array *commands)
 	    // first arg is numeric.
 	    //
 	    if (cmd == kCmd_None) {
-		num = String_ToInteger(arg, -1);
+		num = String_ToMessageNumber(arg, mbox);
 		if (num > 0) {
 		    cmd = kCmd_Show;
 		    argi--;
@@ -4320,10 +4332,15 @@ void RunLoop(Mailbox *mbox, Array *commands)
 	    if (String_IsEqual(arg, &Str_Plus, true))
 		goto list_next;
 	    if (arg != NULL)
-		cur = String_ToInteger(arg, -1);
+		cur = String_ToMessageNumber(arg, mbox);
+	    arg = NextArg(&argi, args, false);
+	    if (arg != NULL)
+		num = iMax(1, String_ToMessageNumber(arg, mbox) - cur);
+	    else
+		num = gPageHeight - 1;
 	    if (!NoNextArg(&argi, args))
 		break;
-	    ListMailbox(gStdOut, mbox, cur, gPageHeight - 1);
+	    ListMailbox(gStdOut, mbox, cur, num);
 	    break;
 
 	  case kCmd_ListNext:
@@ -4421,7 +4438,7 @@ void RunLoop(Mailbox *mbox, Array *commands)
 
 	  case kCmd_Edit:
 	    arg = NextArg(&argi, args, false);
-	    num = arg != NULL ? String_ToInteger(arg, -1) : cur;
+	    num = arg != NULL ? String_ToMessageNumber(arg, mbox) : cur;
 	    if (!NoNextArg(&argi, args))
 		break;
 	    msg = GetMessageByNumber(mbox, num);
@@ -4540,7 +4557,7 @@ void Usage(const char *pname, bool help)
 
     if (help) {
 	fprintf(stderr, "The options include:\n"
-		"  -b \t\tmove mbox to mbox~ before changing it\n"
+		"  -b \t\tbackup mbox to mbox~ before changing it\n"
 		"  -c \t\tcheck the mbox for consistency\n"
 		"  -d \t\tdebug mode (see source code)\n"
 		"  -f <file> \tprocess mbox <file>\n"
@@ -4602,6 +4619,8 @@ int main(int argc, char **argv)
 		gMap = false;
 	    } else if (strcmp(opt, "verbose") == 0) {
 		gVerbose = true;
+	    } else if (strcmp(opt, "help") == 0) {
+		Usage(argv[0], true);
 	    } else {
 		//Usage(argv[0]);
 		Array_Append(commands, String_FromCString(opt, false));

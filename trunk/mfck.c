@@ -18,6 +18,7 @@
 #include <sys/stat.h>
 #include <math.h>
 #include <time.h>
+#include <setjmp.h>
 
 #ifdef USE_GC
 #  ifdef DEBUG
@@ -48,6 +49,8 @@
 
 #define kDefaultEditor				"ed"
 #define kDefaultPager				"cat"
+
+#define kDefaultLockTimeout			5	// sec
 
 #define kString_ExcerptLength			50
 
@@ -189,6 +192,8 @@ String_Define(Str_Minus, "-");
 String_Define(Str_True, "true");
 String_Define(Str_Strict, "strict");
 
+String_Define(Str_DotLock, ".lock");
+
 /*
 **  Global Variables
 */
@@ -214,6 +219,15 @@ String *gPager = NULL;
 Stream *gStdOut;
 int gPageWidth = kDefaultPageWidth;
 int gPageHeight = kDefaultPageHeight;
+
+jmp_buf *gInterruptReentry = NULL;
+FILE *gOpenPipe = NULL;
+
+/*
+**  Forward Declarations
+*/
+
+void Exit(int ret);
 
 /*
 **  Math Functions
@@ -326,7 +340,7 @@ void Fatal(int err, const char *fmt, ...)
     va_end(args);
 
     if (err != EX_OK)
-	exit(err);
+	Exit(err);
 }
 
 /*
@@ -504,14 +518,14 @@ void String_FreeP(String **pStr)
     }
 }
 
-String *String_Append(String *sub, ...)
+String *String_Append(const String *sub, ...)
 {
-    String *s;
+    const String *s;
     va_list args;
     int len = 0;
 
     va_start(args, sub);
-    for (s = sub; s != NULL; s = va_arg(args, String *)) {
+    for (s = sub; s != NULL; s = va_arg(args, const String *)) {
 	len += String_Length(s);
     }
     va_end(args);
@@ -2627,8 +2641,11 @@ void Stream_WriteMessage(Stream *output, Message *msg)
  **  Mailbox Functions
  **/
 
+extern void Mailbox_Unlock(const String *source);
+
 void Mailbox_Free(Mailbox *mbox)
 {
+    Mailbox_Unlock(mbox->source);
     Message_Free(mbox->root, true);
     String_Free(mbox->data);
     String_Free(mbox->name);
@@ -2712,10 +2729,172 @@ bool Parse_Messages(Parser *par, Mailbox *mbox)
     return true;
 }
 
+static int readint(int fd)
+{
+    char buf[16];
+    int nc = read(fd, buf, sizeof(buf) - 1);
+    if (nc < 0)
+	return -1;
+    buf[nc] = '\0';
+    return atoi(buf);
+}
+
+static bool writeint(int fd, int k)
+{
+    char buf[16];
+    sprintf(buf, "%d", k);
+    int len = strlen(buf);
+    return write(fd, buf, len) == len;
+}
+
+static Array *gMailboxLocks;
+
+bool Mailbox_Lock(const String *source, int timeout)
+{
+    if (gDryRun)
+	return true;
+
+    String *lockFile = String_Append(source, &Str_DotLock, NULL);
+    const char *cLockFile = String_CString(lockFile);
+    time_t start, end;
+    int fd;
+
+    time(&start);
+
+    // Try to create a .lock file, but only if one doesn't already exist
+    //
+    while ((fd = open(cLockFile, O_WRONLY|O_EXCL|O_CREAT, 0444)) == -1) {
+	int err = errno;
+	
+	// Give up if we've been waiting too long
+	//
+	time(&end);
+
+	if (end - start > timeout) {
+	    // Fake a more meaningful error if needed
+	    errno = (err == EEXIST) ? ENOLCK : err;
+	    String_Free(lockFile);
+	    return false;
+	}
+	
+	// Check if 1) the file already exists, 2) if it contains a pid of
+	// the owner, and 3) if the owner process still exists.
+	//
+	if (errno == EEXIST) {
+	    fd = open(cLockFile, O_RDONLY);
+	    if (fd != -1) {
+		int pid = readint(fd);
+		close(fd);
+
+		if (pid > 0 && kill(pid, 0) == -1) {
+		    // Process is gone, nuke the lock
+		    Note("Removing lock %s from defunct process %d",
+			 cLockFile, pid);
+		    if (unlink(cLockFile) != 0) {
+			// Ugh!
+			String_Free(lockFile);
+			return false;
+		    }
+
+		    // Try locking it again
+		    continue;
+		}
+	    }
+	}
+
+	sleep(1);
+    }
+
+    // Great, got the .lock file!  Now record our pid in it
+    //
+    if (!writeint(fd, getpid())) {
+	int err = errno;
+	close(fd);
+	errno = err;
+	String_Free(lockFile);
+	return false;
+    }
+
+    if (close(fd) != 0) {
+	String_Free(lockFile);
+	return false;
+    }
+
+    // Remember that we've locked this mailbox
+    Array_Append(gMailboxLocks, lockFile);
+
+    return true;
+}
+
+void Mailbox_Unlock(const String *source)
+{
+    if (gDryRun)
+	return;
+
+    String *lockFile = String_Append(source, &Str_DotLock, NULL);
+    const char *cLockFile = String_CString(lockFile);
+    int fd;
+
+    // Make sure we still own the lock
+    fd = open(cLockFile, O_RDONLY);
+    if (fd == -1) {
+	Warn("Could not open lock file %s: %s",
+	     cLockFile, strerror(errno));
+	String_Free(lockFile);
+	return;
+    }
+
+    int pid = readint(fd);
+    close(fd);
+
+    if (pid != getpid()) {
+	// Not ours
+	if (pid < 0)
+	    Warn("Could not read lock file %s: %s",
+		 cLockFile, strerror(errno));
+	else if (pid == 0)
+	    Warn("Someone stole lock file %s", cLockFile);
+	else
+	    Warn("Someone with pid %d stole lock file %s", pid, cLockFile);
+	String_Free(lockFile);
+	return;
+    }
+
+    if (unlink(cLockFile) != 0) {
+	Error("Could not remove lock file %s: %s", cLockFile, strerror(errno));
+	String_Free(lockFile);
+	return;
+    }
+
+    int i;
+
+    for (i = 0; i < Array_Count(gMailboxLocks); i++) {
+	const String *oldLock = Array_GetAt(gMailboxLocks, i);
+	if (String_IsEqual(oldLock, lockFile, true)) {
+	    Array_DeleteAt(gMailboxLocks, i);
+	    break;
+	}
+    }
+
+    String_Free(lockFile);
+}
+
+void Mailbox_UnlockAll(void)
+{
+    int i;
+
+    for (i = Array_Count(gMailboxLocks) - 1; i >= 0; i--) {
+	Mailbox_Unlock(Array_GetAt(gMailboxLocks, i));
+    }
+}
+
 Mailbox *Mailbox_Open(const String *source, bool create)
 {
     if (gVerbose)
 	Note("Opening mailbox %s", String_CString(source));
+
+    if (!Mailbox_Lock(source, kDefaultLockTimeout))
+	return NULL;
 
     // We only support mbox files for now
     //
@@ -2763,7 +2942,7 @@ void Stream_WriteMailbox(Stream *output, Mailbox *mbox, bool sanitize)
     // 
     if (sanitize) {
 	Message *first, *msg;
-	String *imap;
+	String *imap = NULL;
 
 	// Find first non-deleted message
 	//
@@ -3030,6 +3209,37 @@ int MessageSet_Next(MessageSet *set, int cur)
 /*
 **  Application Functions
 */
+
+void InterruptHandler(int signum)
+{
+    putchar('\n');
+
+    if (gOpenPipe != NULL) {
+	pclose(gOpenPipe);
+	gOpenPipe = NULL;
+    }
+
+#if 0
+    // Kill all subprocesses in our process group
+    printf("# killpg\n");
+    sig_t oldHandler = signal(SIGTERM, SIG_IGN);
+    killpg(0, SIGTERM);
+    signal(SIGTERM, oldHandler);
+#endif
+
+    if (signum == SIGINT && gInterruptReentry != NULL)
+	longjmp(*gInterruptReentry, 0);
+
+    // Close all open mailboxes
+    Mailbox_UnlockAll();
+
+    // Resend signal (and hopefully die)
+    signal(signum, SIG_DFL);
+    kill(0, signum);
+
+    // Still here?
+    exit(EX_UNAVAILABLE);
+}
 
 void WriteQuotedExcerpt(FILE *out, String *str, int pos, int lines,
 			const char *prefix)
@@ -3516,12 +3726,14 @@ Array *SplitMessages(Mailbox *mbox, Array *mary)
 
 void ShowMessage(Message *msg)
 {
-    FILE *out = stdout;
+    // Disable SIGINT handling while running the pager
+
+    signal(SIGINT, SIG_IGN);
 
     if (gPager != NULL)
-	out = popen(String_CString(gPager), "w");
+	gOpenPipe = popen(String_CString(gPager), "w");
 
-    Stream *stream = Stream_New(out, gPager, true);
+    Stream *stream = Stream_New(gOpenPipe, gPager, true);
     stream->ignoreErrors = true;
 
     Stream_PrintF(stream, "[Mailbox %s: Message %s]\n",
@@ -3529,9 +3741,14 @@ void ShowMessage(Message *msg)
 		  String_CString(msg->tag));
     Stream_WriteMessage(stream, msg);
 
-    if (gPager != NULL)
-	pclose(stream->file);
+    if (gPager != NULL) {
+	pclose(gOpenPipe);
+	gOpenPipe = NULL;
+    }
     Stream_Free(stream, false);
+    
+    // Restore our interrupt handler
+    signal(SIGINT, InterruptHandler);
 }
 
 bool EditFile(String *path)
@@ -3883,8 +4100,8 @@ void UniqueMailbox(Mailbox *mbox)
 	    }
 
 	    if (same) {
-		Note("Messages %s and %s have the same Message-ID\n"
-		     "%s, deleting the latter",
+		Note("Messages %s and %s with Message-ID\n"
+		     " %s are the same, deleting the latter",
 		     String_CString(m->tag),
 		     String_CString(n->tag),
 		     String_PrettyCString(m->cachedID)); 
@@ -4200,6 +4417,7 @@ void ShowHelp(Stream *output, String *cmd, CommandTable *ctable)
 
 void RunLoop(Mailbox *mbox, Array *commands)
 {
+    jmp_buf reentry;
     int msgCount;
     int cmdCount = Array_Count(commands);
     const String *cmdLine;
@@ -4211,6 +4429,9 @@ void RunLoop(Mailbox *mbox, Array *commands)
     InitCommandTable(kCommandTable);
 
     while (!done) {
+	setjmp(reentry);
+	gInterruptReentry = &reentry;
+
 	if (ci < cmdCount) {
 	    cmdLine = Array_GetAt(commands, ci++);
 	} else if (!gInteractive || !User_AskLine("@", &cmdLine, true)) {
@@ -4457,6 +4678,12 @@ void RunLoop(Mailbox *mbox, Array *commands)
 		break;
 
 	    Mailbox *mbox2 = Mailbox_Open(arg, true);
+	    if (mbox2 == NULL) {
+		Error("Could not open %s: %s",
+		      String_CString(arg), strerror(errno));
+		break;
+	    }
+
 	    count = 0;
 	    for (num = MessageSet_First(set); num != -1;
 		 num = MessageSet_Next(set, num)) {
@@ -4506,6 +4733,7 @@ void RunLoop(Mailbox *mbox, Array *commands)
 	MessageSet_Free(set);
 	set = NULL;
     }
+    gInterruptReentry = NULL;
 
     // Autosave if needed
     //
@@ -4576,7 +4804,7 @@ void Usage(const char *pname, bool help)
 	fprintf(stderr, "(run: \"%s -h\" for more information)\n", pname);
     }
 
-    exit(EX_USAGE);
+    Exit(EX_USAGE);
 }
 
 void Help(const char *pname)
@@ -4589,8 +4817,16 @@ String *NextMainArg(int *pAC, int argc, char **argv)
     return *pAC < argc ? String_FromCString(argv[++*pAC], false) : NULL;
 }
 
+void Exit(int ret)
+{
+    Mailbox_UnlockAll();
+    exit(ret);
+}
+
 int main(int argc, char **argv)
 {
+    gMailboxLocks = Array_New(0, (Free *) String_Free);
+
     String *outFile = NULL;
     Stream *output = NULL;
     Array *commands = Array_New(0, (Free *) String_Free);
@@ -4604,6 +4840,16 @@ int main(int argc, char **argv)
 
     // We don't care about broken (pager) pipes
     signal(SIGPIPE, SIG_IGN);
+
+    // Handle interrupts
+    signal(SIGHUP, InterruptHandler);
+    signal(SIGINT, InterruptHandler);
+    signal(SIGQUIT, InterruptHandler);
+    signal(SIGILL, InterruptHandler);
+    signal(SIGABRT, InterruptHandler);
+    signal(SIGBUS, InterruptHandler);
+    signal(SIGSEGV, InterruptHandler);
+    signal(SIGTERM, InterruptHandler);
 
     for (ac = 1; ac < argc && argv[ac][0] == '-'; ac++) {
 	if (argv[ac][1] == '-') {
@@ -4697,6 +4943,7 @@ int main(int argc, char **argv)
 #endif
 
     return EX_OK;
+
 }
 
 #ifdef DEBUG

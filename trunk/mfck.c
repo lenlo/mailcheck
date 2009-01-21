@@ -3772,13 +3772,20 @@ bool EditFile(String *path)
 
     oldmtime = sbuf.st_mtime;
 
-    String *cmd = String_Append(editor, &Str_Space, path, NULL);
-    system(String_CString(cmd));
-    String_Free(cmd);
-
     Note("Editing message file %s", cPath);
 
-    if (stat(cPath, &sbuf) != 0 || sbuf.st_mtime == oldmtime) {
+    String *cmd = String_Append(editor, &Str_Space, path, NULL);
+    int ret = system(String_CString(cmd));
+    if (ret == -1) {
+	Error("Could not execute %s: %s",
+	      String_CString(cmd), strerror(errno));
+    } else if (ret != 0) {
+	Error("%s signalled an error, discarding changes",
+	      String_CString(cmd));
+    }
+    String_Free(cmd);
+
+    if (ret != 0 || stat(cPath, &sbuf) != 0 || sbuf.st_mtime == oldmtime) {
 	return false;
     }
 
@@ -4008,7 +4015,10 @@ void DiffMessages(Message *a, Message *b)
 		      String_CString(tmpa->name), String_CString(tmpb->name),
 		      gPager != NULL ? String_CString(gPager) : kDefaultPager);
 
-    system(String_CString(cmd));
+    if (system(String_CString(cmd)) == -1) {
+	Error("Could not execute \"%s\": %s",
+	      String_CString(cmd), strerror(errno));
+    }
     String_Free(cmd);
 
     Stream_Free(tmpa, true);

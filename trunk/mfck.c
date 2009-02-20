@@ -1055,7 +1055,7 @@ void Parse_StringStart(Parser *par, String **pResult)
 
 void Parse_StringEnd(Parser *par, String *str)
 {
-    String_SetLength(str, String_Chars(&par->rest) - String_Chars(str));    
+    String_SetLength(str, String_Chars(&par->rest) - String_Chars(str));
 }
 
 bool Parse_ConstChar(Parser *par, char ex, bool sameCase, String **pResult)
@@ -1917,7 +1917,7 @@ void Header_Delete(Headers *headers, const String *key, bool all)
 bool Parse_Header(Parser *par, Header **phead)
 {
     Header *head = New(Header);
-    int warnCount;
+    int warnCount = 0;
     char ch;
 
     if (gCheck) {
@@ -1932,15 +1932,28 @@ bool Parse_Header(Parser *par, Header **phead)
 
     // Parse header name
     //
+    int pos = Parser_Position(par);
     Parse_StringStart(par, &head->line);
     Parse_StringStart(par, &head->key);
-    warnCount = 0;
     while (Parse_Char(par, &ch) && ch != ':') {
+	if (ch == ' ') {
+	    // Whoa, hold it right there!  There shouldn't be any spaces in
+	    // header keys.  Is it a "From " line that we've stumbled upon?
+	    Parse_StringEnd(par, head->key);
+	    if (String_IsEqual(head->key, &Str_FromSpace, true)) {
+		// Yup, complain & back up.
+		Parser_MoveTo(par, pos);
+		Warn("Encountered unexpected \"From \" line in headers {@%d}",
+		     Parser_Position(par));
+		return false;
+	    }
+	}
 	if (gCheck && ch >= '\0' && ch <= ' ') {
 	    if (++warnCount < kCheck_MaxWarnCount)
 		Warn("Illegal character %s in message headers%s {@%d}",
-		     Char_QuotedCString(ch), Parser_Position(par),
-		     warnCount == kCheck_MaxWarnCount ? " (and more)" : "");
+		     Char_QuotedCString(ch), 
+		     warnCount == kCheck_MaxWarnCount ? " (and more)" : "",
+		     Parser_Position(par));
 	}
     }
     Parse_StringEnd(par, head->key);

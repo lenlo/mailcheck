@@ -30,7 +30,8 @@
 #  define free					GC_FREE
 #endif
 
-#define FUZZY_NEWLINE
+#define OPT_FUZZY_NEWLINE
+#define OPT_LOCK_FILE
 
 #define kCheck_MaxWarnCount			5
 
@@ -2350,7 +2351,7 @@ bool TryWorkaroundDovecotFromSpaceBug(Parser *par, Message *msg, int cllen)
 	// valid?
 	//
 	if (xHeadSpace > 0 && Parser_MoveTo(par, savedPos + xHeadSpace)) {
-#if 1 || defined(FUZZY_NEWLINE)
+#if 1 || defined(OPT_FUZZY_NEWLINE)
 	    int ch = Parse_Peek(par);
 
 	    // Look for "[\n]\nFrom "...
@@ -2443,7 +2444,7 @@ void MoveToEndOfMessage(Parser *par, Message *msg)
 	//
 	if (Parser_Move(par, cllen)) {
 	    int endPos = Parser_Position(par);
-#ifdef FUZZY_NEWLINE
+#ifdef OPT_FUZZY_NEWLINE
 	    int ch = Parse_Peek(par);
 
 	    if (ch == 'F') {
@@ -2742,7 +2743,7 @@ bool Parse_Messages(Parser *par, Mailbox *mbox)
     return true;
 }
 
-static int readint(int fd)
+int readint(int fd)
 {
     char buf[16];
     int nc = read(fd, buf, sizeof(buf) - 1);
@@ -2752,7 +2753,7 @@ static int readint(int fd)
     return atoi(buf);
 }
 
-static bool writeint(int fd, int k)
+bool writeint(int fd, int k)
 {
     char buf[16];
     sprintf(buf, "%d", k);
@@ -2760,13 +2761,14 @@ static bool writeint(int fd, int k)
     return write(fd, buf, len) == len;
 }
 
-static Array *gMailboxLocks;
+static Array *gLockedMailboxes;
 
 bool Mailbox_Lock(const String *source, int timeout)
 {
     if (gDryRun)
 	return true;
 
+#ifdef OPT_LOCK_FILE
     String *lockFile = String_Append(source, &Str_DotLock, NULL);
     const char *cLockFile = String_CString(lockFile);
     time_t start, end;
@@ -2818,23 +2820,24 @@ bool Mailbox_Lock(const String *source, int timeout)
 	sleep(1);
     }
 
+    String_Free(lockFile);
+
     // Great, got the .lock file!  Now record our pid in it
     //
     if (!writeint(fd, getpid())) {
 	int err = errno;
 	close(fd);
 	errno = err;
-	String_Free(lockFile);
 	return false;
     }
 
     if (close(fd) != 0) {
-	String_Free(lockFile);
 	return false;
     }
+#endif
 
     // Remember that we've locked this mailbox
-    Array_Append(gMailboxLocks, lockFile);
+    Array_Append(gLockedMailboxes, String_Copy(source));
 
     return true;
 }
@@ -2844,6 +2847,7 @@ void Mailbox_Unlock(const String *source)
     if (gDryRun)
 	return;
 
+#ifdef OPT_LOCK_FILE
     String *lockFile = String_Append(source, &Str_DotLock, NULL);
     const char *cLockFile = String_CString(lockFile);
     int fd;
@@ -2879,25 +2883,26 @@ void Mailbox_Unlock(const String *source)
 	return;
     }
 
+    String_Free(lockFile);
+#endif
+
     int i;
 
-    for (i = 0; i < Array_Count(gMailboxLocks); i++) {
-	const String *oldLock = Array_GetAt(gMailboxLocks, i);
-	if (String_IsEqual(oldLock, lockFile, true)) {
-	    Array_DeleteAt(gMailboxLocks, i);
+    for (i = 0; i < Array_Count(gLockedMailboxes); i++) {
+	const String *oldLock = Array_GetAt(gLockedMailboxes, i);
+	if (String_IsEqual(oldLock, source, true)) {
+	    Array_DeleteAt(gLockedMailboxes, i);
 	    break;
 	}
     }
-
-    String_Free(lockFile);
 }
 
 void Mailbox_UnlockAll(void)
 {
     int i;
 
-    for (i = Array_Count(gMailboxLocks) - 1; i >= 0; i--) {
-	Mailbox_Unlock(Array_GetAt(gMailboxLocks, i));
+    for (i = Array_Count(gLockedMailboxes) - 1; i >= 0; i--) {
+	Mailbox_Unlock(Array_GetAt(gLockedMailboxes, i));
     }
 }
 
@@ -2926,6 +2931,7 @@ Mailbox *Mailbox_Open(const String *source, bool create)
 	}
 
 	Stream_Free(input, true);
+
     } else if (!create) {
 	return NULL;
     }
@@ -3740,13 +3746,15 @@ Array *SplitMessages(Mailbox *mbox, Array *mary)
 void ShowMessage(Message *msg)
 {
     // Disable SIGINT handling while running the pager
+    FILE *output = stdout;
 
     signal(SIGINT, SIG_IGN);
 
-    if (gPager != NULL)
-	gOpenPipe = popen(String_CString(gPager), "w");
+    if (gPager != NULL) {
+	gOpenPipe = output = popen(String_CString(gPager), "w");
 
-    Stream *stream = Stream_New(gOpenPipe, gPager, true);
+
+    Stream *stream = Stream_New(output, gPager, true);
     stream->ignoreErrors = true;
 
     Stream_PrintF(stream, "[Mailbox %s: Message %s]\n",
@@ -4848,7 +4856,7 @@ void Exit(int ret)
 
 int main(int argc, char **argv)
 {
-    gMailboxLocks = Array_New(0, (Free *) String_Free);
+    gLockedMailboxes = Array_New(0, (Free *) String_Free);
 
     String *outFile = NULL;
     Stream *output = NULL;
@@ -4858,7 +4866,7 @@ int main(int argc, char **argv)
     int ac;
 
     //gInteractive = isatty(0);
-    gPager = String_FromCString(getenv("PAGER"), false);
+    gPager = String_FromCString(cPager, false);
     gStdOut = Stream_Open(NULL, true, true);
 
     // We don't care about broken (pager) pipes

@@ -2605,7 +2605,11 @@ bool Parse_Message(Parser *par, Mailbox *mbox, bool useAllData, Message **pMsg)
 
     // Allow (expect) for a "From " envelope to start the message
     //
-    Parse_FromSpaceLine(par, &msg->envelope, &msg->envSender, &msg->envDate);
+    if (!Parse_FromSpaceLine(par, &msg->envelope, &msg->envSender,
+			     &msg->envDate)) {
+	Warn("Could not find a valid \"From \" line for message %s",
+	     String_CString(msg->tag));
+    }
 
     // Parse headers (until & including empty line)
     //

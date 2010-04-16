@@ -34,6 +34,7 @@
 #define OPT_LOCK_FILE
 
 #define kCheck_MaxWarnCount			5
+#define kContext_LineCount			2 // before & after
 
 #define kArray_InitialSize			32
 #define kArray_GrowthFactor			1.4
@@ -148,12 +149,14 @@ typedef struct {
 String_Define(Str_Emtpy, "");
 String_Define(Str_Newline, "\n");
 String_Define(Str_Space, " ");
+String_Define(Str_TwoDashes, "--");
 
 // Header Keys
 String_Define(Str_Bcc, "bcc");
 String_Define(Str_Cc, "cc");
 String_Define(Str_ContentLength, "Content-Length");
 String_Define(Str_ContentTransferEncoding, "Content-Transfer-Encoding");
+String_Define(Str_ContentType, "Content-Type");
 String_Define(Str_Date, "Date");
 String_Define(Str_From, "From");
 String_Define(Str_FromSpace, "From ");
@@ -177,6 +180,10 @@ String_Define(Str_XUID, "X-UID");
 // Content-Transfer-Encodings
 String_Define(Str_Binary, "binary");
 String_Define(Str_8Bit, "8bit");
+
+// Content-Types (and parameters)
+String_Define(Str_Multipart, "multipart");
+String_Define(Str_Boundary, "boundary");
 
 // Other Strings
 String_Define(Str_All, "all");
@@ -209,6 +216,7 @@ bool gDebug = false;
 bool gDryRun = false;
 bool gInteractive = false;
 bool gMap = true;
+bool gShowContext = false;
 bool gStrict = false;
 bool gQuiet = false;
 bool gUnique = false;
@@ -304,19 +312,24 @@ void Note(const char *fmt, ...)
     va_end(args);
 }
 
-void Warn(const char *fmt, ...)
+void WarnV(const char *fmt, va_list args)
 {
-    va_list args;
-
-    va_start(args, fmt);
     if (!gQuiet) {
 	fprintf(stdout, "%%");
 	vfprintf(stdout, fmt, args);
 	fprintf(stdout, "\n");
     }
-    va_end(args);
 
     gWarnings++;
+}
+
+void Warn(const char *fmt, ...)
+{
+    va_list args;
+
+    va_start(args, fmt);
+    WarnV(fmt, args);
+    va_end(args);
 }
 
 void Error(const char *fmt, ...)
@@ -342,6 +355,39 @@ void Fatal(int err, const char *fmt, ...)
 
     if (err != EX_OK)
 	Exit(err);
+}
+
+/* Show n lines of context around the given position.
+ */
+void ShowContext(const char *text, int length, int pos)
+{
+    int b, e, i, count;
+
+    for (b = pos, count = kContext_LineCount + 1; b > 0 && count > 0; b--) {
+	if (Char_IsNewline(text[b]))
+	    count--;
+    }
+    // Point to just after the newline
+    if (count == 0)
+	b += 2;
+
+    for (e = pos, count = kContext_LineCount; e < length && count > 0; e++) {
+	if (Char_IsNewline(text[e]))
+	    count--;
+    }
+    // Point to just after the newline
+    if (count == 0 && e < length && Char_IsNewline(text[e]))
+	e++;
+
+    for (i = b; i < e; i++) {
+	if (i == b || text[i-1] == '\n')
+	    fputs("] ", stderr);
+	/*
+	if (i == pos)
+	    fputs("<here>", stderr);
+	*/
+	putc(text[i], stderr);
+    }
 }
 
 /*
@@ -890,8 +936,8 @@ int Array_Count(const Array *array)
 inline void _Array_CheckBounds(const Array *array, int ix)
 {
     if (ix < 0 || ix >= Array_Count(array)) {
-	Fatal(EX_UNAVAILABLE, "Out of bounds reference to array %#x at %d",
-	      (unsigned) array, ix);
+	Fatal(EX_UNAVAILABLE, "Out of bounds reference to array %#lx at %d",
+	      (unsigned long) array, ix);
     }
 }
 
@@ -1022,6 +1068,26 @@ bool Parser_MoveTo(Parser *par, int pos)
 bool Parser_Move(Parser *par, int count)
 {
     return Parser_MoveTo(par, Parser_Position(par) + count);
+}
+
+void Parser_ShowContext(Parser *par)
+{
+    ShowContext(par->start,
+		String_Chars(&par->rest) - par->start +
+		String_Length(&par->rest),
+		Parser_Position(par));
+}
+
+void Parser_Warn(Parser *par, const char *fmt, ...)
+{
+    va_list args;
+
+    va_start(args, fmt);
+    WarnV(fmt, args);
+    va_end(args);
+    
+    if (gShowContext)
+	Parser_ShowContext(par);
 }
 
 int Parse_Peek(Parser *par)
@@ -1926,8 +1992,8 @@ bool Parse_Header(Parser *par, Header **phead)
 	//
 	ch = Parse_Peek(par);
 	if ((ch >= '\0' && ch <= ' ') || ch == ':') {
-	    Warn("Header starts with illegal character %s",
-		 Char_QuotedCString(ch));
+	    Parser_Warn(par, "Header starts with illegal character %s",
+			Char_QuotedCString(ch));
 	}
     }
 
@@ -1944,17 +2010,17 @@ bool Parse_Header(Parser *par, Header **phead)
 	    if (String_IsEqual(head->key, &Str_FromSpace, true)) {
 		// Yup, complain & back up.
 		Parser_MoveTo(par, pos);
-		Warn("Encountered unexpected \"From \" line in headers {@%d}",
-		     Parser_Position(par));
+		Parser_Warn(par, "Encountered unexpected \"From \" line in "
+			    "headers {@%d}", Parser_Position(par));
 		return false;
 	    }
 	}
 	if (gCheck && ch >= '\0' && ch <= ' ') {
 	    if (++warnCount < kCheck_MaxWarnCount)
-		Warn("Illegal character %s in message headers%s {@%d}",
-		     Char_QuotedCString(ch), 
-		     warnCount == kCheck_MaxWarnCount ? " (and more)" : "",
-		     Parser_Position(par));
+		Parser_Warn(par, "Illegal character %s in message "
+			    "headers%s {@%d}", Char_QuotedCString(ch), 
+			    warnCount == kCheck_MaxWarnCount ? " (and more)":"",
+			    Parser_Position(par));
 	}
     }
     Parse_StringEnd(par, head->key);
@@ -1998,8 +2064,8 @@ bool Parse_Headers(Parser *par, Message *msg, Headers **pHeaders)
 
     while (!Parse_Newline(par, NULL)) {
 	if (Parser_AtEnd(par) || !Parse_Header(par, pHead)) {
-	    Warn("Message %s: Header parsing ended prematurely",
-		 String_CString(msg->tag));
+	    Parser_Warn(par, "Message %s: Header parsing ended prematurely",
+			String_CString(msg->tag));
 	    // Should fail here, but it's arguably better to keep what we got
 	    break;
 	}
@@ -2026,6 +2092,44 @@ void Stream_WriteHeaders(Stream *output, Headers *headers)
 	    Stream_WriteNewline(output);
 	}
     }
+}
+
+/**
+ **  MIME Functions
+ **/
+
+/* Quick'n'Dirty implementation -- resulting string should be String_Freed */
+String *MIME_GetParameter(String *str, const String *key)
+{
+    Parser parser;
+    String *value;
+
+    Parser_Set(&parser, str);
+
+    while (Parse_UntilChar(&parser, ';', false, NULL)) {
+	(void) Parse_ConstChar(&parser, ';', false, NULL);
+	(void) Parse_Spaces(&parser, NULL);
+	if (Parse_ConstString(&parser, key, false, NULL)) {
+	    (void) Parse_Spaces(&parser, NULL);
+	    if (Parse_ConstChar(&parser, '=', false, NULL)) {
+		(void) Parse_Spaces(&parser, NULL);
+		// Got it!  Is it quoted?
+		if (Parse_ConstChar(&parser, '"', false, NULL) &&
+		    Parse_UntilChar(&parser, '"', false, &value)) {
+		    return value;
+		} else if (Parse_UntilChar(&parser, ';', false, &value)) {
+		    String_TrimSpaces(value);
+		    return value;
+		} else {
+		    Parse_UntilEnd(&parser, &value);
+		    String_TrimSpaces(value);
+		    return value;
+		}
+	    }
+	}
+    }
+
+    return NULL;
 }
 
 /**
@@ -2475,8 +2579,8 @@ void MoveToEndOfMessage(Parser *par, Message *msg)
 		// up messages, adding extranoues headers.
 		//
 #ifdef IMMEDIATE_WARNINGS
-		Warn("Message %s: Corrupted by Dovecot \"From \" bug",
-		     String_CString(msg->tag));
+		Parser_Warn(par, "Message %s: Corrupted by Dovecot "
+			    "\"From \" bug", String_CString(msg->tag));
 #endif
 		return;
 
@@ -2561,31 +2665,57 @@ void MoveToEndOfMessage(Parser *par, Message *msg)
 	}
     }
 
-    // Invalid or missing Content-Length, search for "\n\nFrom " or
-    // the end of the data minus one newline instead.
+    // Invalid or missing Content-Length.  First see if we have a
+    // multipart message with a valid ending boundary.
     //
-    if (Parse_UntilString(par, &Str_NL2FromSpace, true, NULL)) {
-	// Advance past one of the newlines
-	//
+    String *contentType = Header_Get(msg->headers, &Str_ContentType);
+    if (contentType != NULL &&
+	String_HasPrefix(contentType, &Str_Multipart, false)) {
+	String *boundary = MIME_GetParameter(contentType, &Str_Boundary);
+	bool done = false;
+
+	if (boundary != NULL) {
+	    String *boundaryEnd =
+		String_Append(&Str_TwoDashes, boundary, &Str_TwoDashes, NULL);
+
+	    done = (Parse_UntilString(par, boundaryEnd, true, NULL) &&
+		    Parser_Move(par, -1) &&
+		    Parse_Newline(par, NULL) &&
+		    Parse_ConstString(par, boundaryEnd, true, NULL) &&
+		    Parse_Newline(par, NULL));
+
+	    String_Free(boundaryEnd);
+	}
+
+	String_Free(boundary);
+			
+	//Parser_Warn(par, "%s boundary", done ? "Found" : "DID NOT FIND");
+	if (done)
+	    // Got it!
+	    return;
+    }
+    Parser_MoveTo(par, bodyPos);
+
+    // Search for "\nFrom " + valid sender & date as a last resort.
+    // (Leave pointing to the second newline.)
+    //
+    while (Parse_UntilString(par, &Str_NLFromSpace, true, NULL)) {
+	int pos = Parser_Position(par);
+
+	(void) Parser_Move(par, 1);
+	if (Parse_FromSpaceLine(par, NULL, NULL, NULL)) {
+	    Parser_MoveTo(par, pos);
+	    return;
+	}
+    }
+
+    // Go to the end of the mailbox minus one newline
+    //
+    Parse_UntilEnd(par, NULL);
+    Parser_Move(par, -1);
+    // Looking at newline?  If not, go to real end (shouldn't happen)
+    if (!Char_IsNewline(Parse_Peek(par)))
 	Parser_Move(par, 1);
-
-    } else {
-	// Go to the end of the mailbox minus one newline
-	//
-	Parse_UntilEnd(par, NULL);
-	Parser_Move(par, -1);
-	// Looking at newline?  If not, go to real end (shouldn't happen)
-	if (!Char_IsNewline(Parse_Peek(par)))
-	    Parser_Move(par, 1);
-    }
-
-#ifdef IMMEDIATE_WARNINGS
-    if (clstr != NULL) {
-	Warn("Message %s: Invalid Content-Length: %s; using %d",
-	     String_CString(msg->tag), String_PrettyCString(clstr),
-	     Parser_Position(par) - bodyPos);
-    }
-#endif
 }
 
 bool Parse_Message(Parser *par, Mailbox *mbox, bool useAllData, Message **pMsg)
@@ -2607,14 +2737,15 @@ bool Parse_Message(Parser *par, Mailbox *mbox, bool useAllData, Message **pMsg)
     //
     if (!Parse_FromSpaceLine(par, &msg->envelope, &msg->envSender,
 			     &msg->envDate)) {
-	Warn("Could not find a valid \"From \" line for message %s",
-	     String_CString(msg->tag));
+	Parser_Warn(par, "Could not find a valid \"From \" line for message %s",
+		    String_CString(msg->tag));
     }
 
     // Parse headers (until & including empty line)
     //
     if (!Parse_Headers(par, msg, &msg->headers)) {
-	Warn("Message %s: Could not parse headers", String_CString(msg->tag));
+	Parser_Warn(par, "Message %s: Could not parse headers",
+		    String_CString(msg->tag));
 	Parser_MoveTo(par, savedPos);
 	return false;
     }
@@ -2741,8 +2872,8 @@ bool Parse_Messages(Parser *par, Mailbox *mbox)
     }
 
     if (!Parser_AtEnd(par))
-	Warn("Unparsable garbage at end of mailbox (@%d):\n %s",
-	     Parser_Position(par), String_QuotedCString(&par->rest, 72));
+	Parser_Warn(par, "Unparsable garbage at end of mailbox (@%d):\n %s",
+		    Parser_Position(par), String_QuotedCString(&par->rest, 72));
 
     return true;
 }
@@ -2841,7 +2972,7 @@ bool Mailbox_Lock(const String *source, int timeout)
 #endif
 
     // Remember that we've locked this mailbox
-    Array_Append(gLockedMailboxes, String_Copy(source));
+    Array_Append(gLockedMailboxes, String_Clone(source));
 
     return true;
 }
@@ -2859,8 +2990,7 @@ void Mailbox_Unlock(const String *source)
     // Make sure we still own the lock
     fd = open(cLockFile, O_RDONLY);
     if (fd == -1) {
-	Warn("Could not open lock file %s: %s",
-	     cLockFile, strerror(errno));
+	Warn("Could not open lock file %s: %s", cLockFile, strerror(errno));
 	String_Free(lockFile);
 	return;
     }
@@ -2871,8 +3001,7 @@ void Mailbox_Unlock(const String *source)
     if (pid != getpid()) {
 	// Not ours
 	if (pid < 0)
-	    Warn("Could not read lock file %s: %s",
-		 cLockFile, strerror(errno));
+	    Warn("Could not read lock file %s: %s", cLockFile, strerror(errno));
 	else if (pid == 0)
 	    Warn("Someone stole lock file %s", cLockFile);
 	else
@@ -2910,14 +3039,8 @@ void Mailbox_UnlockAll(void)
     }
 }
 
-Mailbox *Mailbox_Open(const String *source, bool create)
+Mailbox *Mailbox_OpenQuietly(const String *source, bool create)
 {
-    if (gVerbose)
-	Note("Opening mailbox %s", String_CString(source));
-
-    if (!Mailbox_Lock(source, kDefaultLockTimeout))
-	return NULL;
-
     // We only support mbox files for now
     //
     Stream *input = Stream_Open(source, false, false);
@@ -2950,6 +3073,31 @@ Mailbox *Mailbox_Open(const String *source, bool create)
     if (data != NULL) {
 	Parser_Set(&parser, data);
 	Parse_Messages(&parser, mbox);
+    }
+
+    return mbox;
+}
+
+Mailbox *Mailbox_Open(const String *source, bool create)
+{
+    if (gVerbose)
+	Note("Locking mailbox %s", String_CString(source));
+
+    if (!Mailbox_Lock(source, kDefaultLockTimeout)) {
+	Error("Could not lock %s: %s",
+	      String_CString(source), strerror(errno));
+	return NULL;
+    }
+
+    if (gVerbose)
+	Note("Opening mailbox %s", String_CString(source));
+
+    Mailbox *mbox = Mailbox_OpenQuietly(source, create);
+
+    if (mbox == NULL) {
+	Error("Could not open %s: %s",
+	      String_CString(source), strerror(errno));
+	return NULL;
     }
 
     return mbox;
@@ -3392,12 +3540,12 @@ void CheckMailbox(Mailbox *mbox, bool strict, bool repair)
 		}
 
 	    } else {
-#if 0
+#if 1
 		if (value == NULL) {
 		    Warn("Message %s: Missing Content-Length: header, "
 			 "should be %d",
 			 String_CString(msg->tag), bodyLength);
-		} else {
+		} else
 #endif
 		if (value != NULL) {
 		    Warn("Message %s: Incorrect Content-Length: %s, "
@@ -3754,7 +3902,7 @@ void ShowMessage(Message *msg)
 
     signal(SIGINT, SIG_IGN);
 
-    if (gPager != NULL) {
+    if (gPager != NULL)
 	gOpenPipe = output = popen(String_CString(gPager), "w");
 
 
@@ -4713,11 +4861,8 @@ void RunLoop(Mailbox *mbox, Array *commands)
 		break;
 
 	    Mailbox *mbox2 = Mailbox_Open(arg, true);
-	    if (mbox2 == NULL) {
-		Error("Could not open %s: %s",
-		      String_CString(arg), strerror(errno));
+	    if (mbox2 == NULL)
 		break;
-	    }
 
 	    count = 0;
 	    for (num = MessageSet_First(set); num != -1;
@@ -4786,10 +4931,8 @@ bool ProcessFile(String *file, Array *commands, Stream *output)
 {
     Mailbox *mbox = Mailbox_Open(file, false);
     
-    if (mbox == NULL) {
-	Error("Could not open %s: %s", String_CString(file), strerror(errno));
+    if (mbox == NULL)
 	return false;
-    }
 
     if (!gQuiet) {
 	int count = Mailbox_Count(mbox);
@@ -4869,6 +5012,11 @@ int main(int argc, char **argv)
     int errors = 0;
     int ac;
 
+    const char *cPager = getenv("PAGER");
+
+    if (cPager == NULL)
+	cPager = "more";
+
     //gInteractive = isatty(0);
     gPager = String_FromCString(cPager, false);
     gStdOut = Stream_Open(NULL, true, true);
@@ -4930,6 +5078,7 @@ int main(int argc, char **argv)
 		  case 'u': Array_Append(commands, &Str_Unique); break;
 		  case 'v': gVerbose = true; break;
 		  case 'w': gAutoWrite= true; break;
+		  case 'C': gShowContext = true; break;
 		  case 'N': gMap = false; break;
 		  default:
 		    Usage(argv[0], false);

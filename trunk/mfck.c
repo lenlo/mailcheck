@@ -3540,26 +3540,21 @@ void CheckMailbox(Mailbox *mbox, bool strict, bool repair)
 		}
 
 	    } else {
-#if 1
-		if (value == NULL) {
-		    Warn("Message %s: Missing Content-Length: header, "
-			 "should be %d",
-			 String_CString(msg->tag), bodyLength);
-		} else
-#endif
-		if (value != NULL) {
+		if (value == NULL)
+		    Warn("Message %s: Missing Content-Length:, should be %d%s",
+			 String_CString(msg->tag), bodyLength,
+			 IsRepairingAll(&state) ? " (repairing)" : "");
+		else
 		    Warn("Message %s: Incorrect Content-Length: %s, "
-			 "should be %d%s",
-			 String_CString(msg->tag),
+			 "should be %d%s", String_CString(msg->tag),
 			 String_PrettyCString(value), bodyLength,
 			 IsRepairingAll(&state) ? " (repairing)" : "");
 
-		    if (!ShouldRepair(&state))
-			continue;
+		if (!ShouldRepair(&state))
+		    continue;
 
-		    Header_Set(msg->headers, &Str_ContentLength,
-			       String_PrintF("%d", bodyLength));
-		}
+		Header_Set(msg->headers, &Str_ContentLength,
+			   String_PrintF("%d", bodyLength));
 	    }
 	}
 	if (state.quit)

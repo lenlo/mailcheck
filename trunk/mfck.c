@@ -2718,7 +2718,7 @@ void MoveToEndOfMessage(Parser *par, Message *msg)
 
     Parser_MoveTo(par, bodyPos);
 
-#if 0
+#if 1
     int pos = Parser_Position(par);
     do {
 	if (Parse_FromSpaceLine(par, NULL, NULL, NULL)) {
@@ -2736,6 +2736,11 @@ void MoveToEndOfMessage(Parser *par, Message *msg)
 
 	(void) Parse_Newline(par, NULL);
         if (Parse_FromSpaceLine(par, NULL, NULL, NULL)) {
+	    /* Be aware that we might return a position that is
+	     * before the bodyPos in case the newline separating the
+	     * headers from the body also belongs to the next message's
+	     * "\nFrom " line.
+	     */
             Parser_MoveTo(par, pos);
             return;
         }

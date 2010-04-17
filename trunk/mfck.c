@@ -4985,15 +4985,20 @@ bool ProcessFile(String *file, Array *commands, Stream *output)
     if (mbox == NULL)
 	return false;
 
-    if (!gQuiet) {
+    if (!gQuiet || (gQuiet && gVerbose)) {
 	int count = Mailbox_Count(mbox);
 	String *sizstr = String_ByteSize(String_Length(mbox->data));
+	bool oldQuiet = gQuiet;
+
+	gQuiet = false;
 
 	Note("%s: %d message%s, %s",
 	     String_CString(file),
 	     count, count == 1 ? "" : "s", String_CString(sizstr));
 
 	String_Free(sizstr);
+	
+	gQuiet = oldQuiet;
     }
 
     if (gInteractive || Array_Count(commands) > 0)
@@ -5165,15 +5170,15 @@ int main(int argc, char **argv)
     int i;
 
     for (i = 0; i < Array_Count(files); i++) {
-	if (!ProcessFile(Array_GetAt(files, i), commands, output)) {
+	if (!ProcessFile(Array_GetAt(files, i), commands, output))
 	    errors++;
-	}
 
 	if (gQuiet && gVerbose && gWarnings > 0) {
-	    fprintf(stderr, "[%s: %d warning%s issued]\n",
-		    String_CString(Array_GetAt(files, i)),
-		    gWarnings, gWarnings == 1 ? " was" : "s were");
+	    gQuiet = false;
+	    Warn("%d warning%s issued",
+		 gWarnings, gWarnings == 1 ? " was" : "s were");
 	    gWarnings = 0;
+	    gQuiet = true;
 	}
     }
 

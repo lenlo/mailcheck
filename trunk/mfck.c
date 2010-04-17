@@ -1176,6 +1176,21 @@ bool Parse_Spaces(Parser *par, String **pResult)
     return true;
 }
 
+bool Parse_BackupNewline(Parser *par)
+{
+    const char *b = String_Chars(&par->rest);
+    const char *p = b;
+
+    if (p > par->start && p[-1] == '\n')
+	p--;
+    if (p > par->start && p[-1] == '\r')
+	p--;
+
+    Parser_Move(par, p - b);
+
+    return p < b;
+}
+
 bool Parse_Newline(Parser *par, String **pResult)
 {
     const char *p = String_Chars(&par->rest);
@@ -2694,20 +2709,38 @@ void MoveToEndOfMessage(Parser *par, Message *msg)
 	    // Got it!
 	    return;
     }
-    Parser_MoveTo(par, bodyPos);
 
     // Search for "\nFrom " + valid sender & date as a last resort.
-    // (Leave pointing to the second newline.)
+    // Leave pointing to the second newline.
     //
-    while (Parse_UntilString(par, &Str_NLFromSpace, true, NULL)) {
-	int pos = Parser_Position(par);
+    // (First backup over the newline separating the headers from the body
+    // in case it is an empty body.)
 
-	(void) Parser_Move(par, 1);
+    Parser_MoveTo(par, bodyPos);
+
+#if 0
+    int pos = Parser_Position(par);
+    do {
 	if (Parse_FromSpaceLine(par, NULL, NULL, NULL)) {
 	    Parser_MoveTo(par, pos);
 	    return;
 	}
+    } while (Parse_UntilString(par, &Str_NLFromSpace, true, NULL) &&
+	     (pos = Parser_Position(par)) &&
+	     Parse_Newline(par, NULL));
+#else
+    Parse_BackupNewline(par);
+    
+    while (Parse_UntilString(par, &Str_NLFromSpace, true, NULL)) {
+        int pos = Parser_Position(par);
+
+	(void) Parse_Newline(par, NULL);
+        if (Parse_FromSpaceLine(par, NULL, NULL, NULL)) {
+            Parser_MoveTo(par, pos);
+            return;
+        }
     }
+#endif
 
     // Go to the end of the mailbox minus one newline
     //

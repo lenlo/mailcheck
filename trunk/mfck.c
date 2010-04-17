@@ -2680,9 +2680,10 @@ void MoveToEndOfMessage(Parser *par, Message *msg)
 	}
     }
 
-    // Invalid or missing Content-Length.  First see if we have a
-    // multipart message with a valid ending boundary.
-    //
+    /* Invalid or missing Content-Length.  See if we happen to have a
+     * multipart message with a valid ending boundary.  If so, we can
+     * be pretty sure as to where the message ends.
+     */
     String *contentType = Header_Get(msg->headers, &Str_ContentType);
     if (contentType != NULL &&
 	String_HasPrefix(contentType, &Str_Multipart, false)) {
@@ -2704,21 +2705,28 @@ void MoveToEndOfMessage(Parser *par, Message *msg)
 
 	String_Free(boundary);
 			
-	//Parser_Warn(par, "%s boundary", done ? "Found" : "DID NOT FIND");
 	if (done)
 	    // Got it!
 	    return;
     }
 
-    // Search for "\nFrom " + valid sender & date as a last resort.
-    // Leave pointing to the second newline.
-    //
-    // (First backup over the newline separating the headers from the body
-    // in case it is an empty body.)
+    /* As a last resort, try searching for a valid "\nFrom " line instead.
+     * This is a bit dodgy as messages may potentially contain such a
+     * line as part of their bodies, e.g. when quoting another message.
+     * But what can you do...
+     */
 
     Parser_MoveTo(par, bodyPos);
 
 #if 1
+    /* Look for a valid "From " line, either as the first line of the
+     * body, or later on preceeded by a newline.  Note that if we find
+     * it as the first line of the body, we will return with the
+     * parser position set to the 'F' in "\nFrom " but if we find
+     * it later, it will be set to the '\n'.  There is a newline
+     * preceeding the "From " in both cases, but in the former case
+     * it serves "double duty" as the header terminator as well.
+     */
     int pos = Parser_Position(par);
     do {
 	if (Parse_FromSpaceLine(par, NULL, NULL, NULL)) {
@@ -2729,6 +2737,14 @@ void MoveToEndOfMessage(Parser *par, Message *msg)
 	     (pos = Parser_Position(par)) &&
 	     Parse_Newline(par, NULL));
 #else
+    /* Look for a valid "\nFrom " line. Note that we're first back
+     * up over the newline that terminated the headers before starting
+     * to search.  This is because that newline might actually be part
+     * of the next message's "\nFrom " line instead.  If this happens,
+     * we will return with the parser pointing to that newline, which
+     * may cause our caller (Parse_Message) to save a body with a negative
+     * length!  That's why this code currently is disabled...
+     */
     Parse_BackupNewline(par);
     
     while (Parse_UntilString(par, &Str_NLFromSpace, true, NULL)) {

@@ -2779,6 +2779,12 @@ void MoveToEndOfMessage(Parser *par, Message *msg)
 
 bool Parse_Message(Parser *par, Mailbox *mbox, bool useAllData, Message **pMsg)
 {
+    // Skip over possible newslines (should not be here, but...)
+    if (Parse_Newline(par, NULL)) {
+	Warn("Unexpected newline(s) after message %d", mbox->count);
+	while (Parse_Newline(par, NULL));
+    }
+
     int savedPos = Parser_Position(par);
 
     if (Parser_AtEnd(par))

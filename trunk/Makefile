@@ -1,6 +1,6 @@
 OPT=		-O
-CFLAGS=		-g $(OPT) -Wall -DDEBUG #-DUSE_GC
-LOADLIBES=	#-lgc
+CFLAGS=		-g $(OPT) -Wall -DDEBUG -DUSE_READLINE #-DUSE_GC
+LOADLIBES=	-lreadline #-lgc
 
 TARGET=		mfck
 DESTBIN=	/usr/local/bin

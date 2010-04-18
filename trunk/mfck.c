@@ -20,6 +20,11 @@
 #include <time.h>
 #include <setjmp.h>
 
+#ifdef USE_READLINE
+#  include <readline/readline.h>
+#  include <readline/history.h>
+#endif
+
 #ifdef USE_GC
 #  ifdef DEBUG
 #    define GC_DEBUG
@@ -3271,12 +3276,23 @@ bool Mailbox_Save(Mailbox *mbox, bool force, bool fatal)
 //
 bool User_AskLine(const char *prompt, const String **pLine, bool trim)
 {
-    static char buf[1024];
     static String line = {NULL, 0, kString_Const};
+#ifdef USE_READLINE
+    static char *buf = NULL;
+
+    xfree(buf);
+
+    buf = readline(prompt);
+
+    if (buf == NULL)
+	return EOF;
+#else
+    static char buf[1024];
 
     fprintf(stdout, "%s", prompt);
     if (fgets(buf, sizeof(buf), stdin) == NULL)
 	return false;
+#endif
 
     if (pLine != NULL) {
 	int len = strlen(buf);

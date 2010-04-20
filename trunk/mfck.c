@@ -2965,8 +2965,15 @@ static Array *gLockedMailboxes;
 
 bool Mailbox_Lock(const String *source, int timeout)
 {
+    //String *tmpFile;
+    //String *lockFile;
+
     if (gDryRun)
 	return true;
+
+#ifdef OPT_CCLIENT_LOCK
+    ...
+#endif
 
 #ifdef OPT_LOCK_FILE
     String *lockFile = String_Append(source, &Str_DotLock, NULL);
@@ -4618,7 +4625,7 @@ void InitCommandTable(CommandTable *table)
     }
 }
 
-void ShowHelp(Stream *output, String *cmd, CommandTable *ctable)
+void ShowHelp(Stream *output, String *cmd)
 {
     CommandTable *ct;
 
@@ -4673,6 +4680,24 @@ void ShowHelp(Stream *output, String *cmd, CommandTable *ctable)
     }
 }
 
+#ifdef USE_READLINE
+char *CompleteCommand(const char *prefix, int state)
+{
+    static int curIndex;
+    int prelen = strlen(prefix);
+
+    if (state == 0)
+	curIndex = -1;
+
+    while (kCommandTable[++curIndex].cname != NULL) {
+	if (strncmp(prefix, kCommandTable[curIndex].cname, prelen) == 0)
+	    return strdup(kCommandTable[curIndex].cname);
+    }
+
+    return NULL;
+}
+#endif
+
 void RunLoop(Mailbox *mbox, Array *commands)
 {
     jmp_buf reentry;
@@ -4685,6 +4710,9 @@ void RunLoop(Mailbox *mbox, Array *commands)
     bool success;
 
     InitCommandTable(kCommandTable);
+#ifdef USE_READLINE
+    rl_completion_entry_function = CompleteCommand;
+#endif
 
     while (!done) {
 	setjmp(reentry);
@@ -4978,7 +5006,7 @@ void RunLoop(Mailbox *mbox, Array *commands)
 	    break;
 
 	  case kCmd_Help:
-	    ShowHelp(gStdOut, NextArg(&argi, args, false), kCommandTable);
+	    ShowHelp(gStdOut, NextArg(&argi, args, false));
 	    break;
 	    
 	  case kCmd_None:

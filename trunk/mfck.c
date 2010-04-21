@@ -3298,7 +3298,7 @@ bool User_AskLine(const char *prompt, const String **pLine, bool trim)
     buf = readline(prompt);
 
     if (buf == NULL)
-	return EOF;
+	return false;
     
     add_history(buf);
 #else

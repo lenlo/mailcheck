@@ -5125,7 +5125,10 @@ void Usage(const char *pname, bool help)
 
 void ShowVersion(void)
 {
-    printf("%s (%s)\n%s\n", gVersion, gRevision, gCopyright);
+    int rev = -1;
+
+    sscanf(gRevision, "$Rev$", &rev);
+    printf("%s (rev %d)\n%s\n", gVersion, rev, gCopyright);
 }
 
 String *NextMainArg(int *pAC, int argc, char **argv)

@@ -1,7 +1,8 @@
 /*
 **  mfck -- A mailbox checking tool (and more!)
 **
-**  Copyright (c) 2008, Lennart Lovstrand.  All rights reserved.
+**  Copyright (c) 2008-2010 by Lennart Lovstrand <mfck@lenlolabs.com>
+**
 */
 
 #include <stdio.h>
@@ -3249,7 +3250,8 @@ bool Mailbox_Write(Mailbox *mbox, const String *destination, bool fatal)
 	strcpy(&bakPath[len], "~");
 
 	if (rename(cFile, bakPath) != 0) {
-	    Fatal(fatal ? EX_CANTCREAT : EX_OK, "Could not rename %s to %s: %s",
+	    Fatal(fatal ? EX_CANTCREAT : EX_OK,
+		  "Could not rename %s to %s: %s",
 		  cFile, bakPath, strerror(errno));
 	    return false;
 	}
@@ -5067,10 +5069,18 @@ bool ProcessFile(String *file, Array *commands, Stream *output)
 
 void Usage(const char *pname, bool help)
 {
-    fprintf(stderr, "Usage: %s [-acdfhinopqruvN] [<file> ...]\n", pname);
+    const char *p = strrchr(pname, '/');
+    if (p != NULL)
+	pname = p + 1;
+
+    fprintf(stderr, "Usage: %s [-acdfhinopqruvN] <mbox> ...\n", pname);
 
     if (help) {
-	fprintf(stderr, "The options include:\n"
+	fprintf(stderr, "\n%s is a mailbox file checking tool.  It will allow "
+		"you to check\nyour mbox files' integrity, examine their "
+		"contents, and optionally\nperform automatic repairs.\n",
+		pname);
+	fprintf(stderr, "\nOptions include:\n"
 		"  -b \t\tbackup mbox to mbox~ before changing it\n"
 		"  -c \t\tcheck the mbox for consistency\n"
 		"  -d \t\tdebug mode (see source code)\n"
@@ -5087,8 +5097,22 @@ void Usage(const char *pname, bool help)
 		"  -C \t\tshow a few lines of context around parse errors\n"
 		"  -N \t\tdon't try to mmap the mbox file\n"
 		);
+	fprintf(stderr, "\nIf given no options, %s will simply to try read "
+		"the given mbox files\nand then quit. ", pname);
+
+	fprintf(stderr, "More interestion examples might be:\n\n");
+	fprintf(stderr, "%s -c mbox\tto check the mbox file and report "
+		"any inconsistencies\n", pname);
+	fprintf(stderr, "%s -rb mbox\tto check mbox' consistency, perform "
+		"any necessary repairs,\n\t\tand save the original file as "
+		"mbox~\n", pname);
+	fprintf(stderr, "%s -ci mbox\tto check mbox' consistency and then "
+		"enter interactive mode\n\t\twhere you can further inspect "
+		"and make possible changes\n", pname);
+	fprintf(stderr, "\nIf you just want to test things out without making "
+		"any changes at all,\nadd the -n flag too.\n");
     } else {
-	fprintf(stderr, "(run: \"%s -h\" for more information)\n", pname);
+	fprintf(stderr, "(Run: \"%s -h\" for more information)\n", pname);
     }
 
     Exit(EX_USAGE);
@@ -5119,7 +5143,7 @@ int main(int argc, char **argv)
     Array *commands = Array_New(0, (Free *) String_Free);
     Array *files = Array_New(0, (Free *) String_Free);
     int errors = 0;
-    int ac;
+    int ac, i;
 
     const char *cPager = getenv("PAGER");
 
@@ -5205,6 +5229,7 @@ int main(int argc, char **argv)
 	Array_Append(files, String_FromCString(argv[ac], false));
     }
 
+#ifdef DEFAULT_TO_INBOX
     if (Array_Count(files) == 0) {
 	const char *cMail = getenv("MAIL");
 	String *mailFile;
@@ -5218,8 +5243,10 @@ int main(int argc, char **argv)
 
 	Array_Append(files, mailFile);
     }
-
-    int i;
+#else
+    if (Array_Count(files) == 0)
+	Usage(argv[0], false);
+#endif
 
     for (i = 0; i < Array_Count(files); i++) {
 	if (!ProcessFile(Array_GetAt(files, i), commands, output))

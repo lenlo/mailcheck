@@ -23,4 +23,7 @@ install:	$(TARGET)
 	install -c $(TARGET) $(DESTBIN)
 
 clean:
-	rm -rf $(TARGET) *.o
+	rm -rf $(TARGET) *.o TAGS
+
+tags:
+	etags $(TARGET).c

@@ -19,6 +19,9 @@
 #include <math.h>
 #include <time.h>
 #include <setjmp.h>
+#include <sys/types.h>
+#include <dirent.h>
+#include <limits.h>
 
 #ifdef USE_READLINE
 #  include <readline/readline.h>
@@ -203,7 +206,7 @@ String_Define(Str_Plus, "+");
 String_Define(Str_Minus, "-");
 
 String_Define(Str_True, "true");
-String_Define(Str_Strict, "strict");
+String_Define(Str_Stringent, "stringent");
 
 String_Define(Str_DotLock, ".lock");
 
@@ -222,7 +225,7 @@ bool gDryRun = false;
 bool gInteractive = false;
 bool gMap = true;
 bool gShowContext = false;
-bool gStrict = false;
+bool gStringent = false;
 bool gQuiet = false;
 bool gUnique = false;
 bool gVerbose = false;
@@ -485,6 +488,8 @@ inline void String_SetChars(String *str, const char *buf)
 inline void String_SetLength(String *str, int len)
 {
     str->len = len;
+    if (str->type == kString_Alloced)
+	((char *) str->buf)[len] = '\0';
 }
 
 inline void String_Set(String *str, const char *buf, int len)
@@ -523,7 +528,9 @@ String *String_Clone(const String *str)
 
 String *String_Alloc(int length)
 {
-    return String_New(kString_Alloced, xalloc(NULL, length), length);
+    char *buf = xalloc(NULL, length + 1);
+    buf[length] = '\0';
+    return String_New(kString_Alloced, buf, length);
 }
 
 String *String_FromCString(const char *chars, bool copy)
@@ -793,6 +800,10 @@ const char *String_CString(const String *str)
     if (str == NULL)
 	return NULL;
 
+    // Some strings are guaranteed to already be null terminated
+    if (str->type == kString_Alloced || str->type == kString_Const)
+	return str->buf;
+
     char **pdup = String_NextCStringPoolSlot();
     int len = String_Length(str);
 
@@ -892,8 +903,9 @@ String *String_PrintF(const char *fmt, ...)
     buf[sizeof(buf)-1] = '\0';
 
     int len = strlen(buf);
-    char *dup = xalloc(NULL, len);
+    char *dup = xalloc(NULL, len + 1);
     memcpy(dup, buf, len);
+    dup[len] = '\0';
 
     return String_New(kString_Alloced, dup, len);
 }
@@ -1511,7 +1523,8 @@ bool Stream_ReadContents(Stream *input, String **pContents)
 	}
 
 	size = offset;
-	data = xalloc(data, size);
+	data = xalloc(data, size + 1);
+	data[size] = '\0';
 
 	if (count < 0) {
 	    xfree(data);
@@ -1702,7 +1715,7 @@ static int ParseTwoDigits(Parser *par, bool leadingSpaceOK)
     return (c1 - '0') * 10 + (c2 - '0');
 }
 
-// Note: This is not a strict ctime parser since some mail
+// Note: This is not a stringent ctime parser since some mail
 // systems leave out the seconds field and/or add a timezone.
 //
 static bool ParseCTimeHelper(Parser *par, struct tm *pTime)
@@ -2328,7 +2341,7 @@ void WarnContentLength(Message *msg, int contLen, int bodyLen)
 	Warn("Message %s: Oversized, %d bytes too many",
 	     String_CString(msg->tag), bodyLen - contLen);
 
-    } else if (gStrict) {
+    } else if (gStringent) {
 	Warn("Message %s: Incorrect Content-Length: %d; using %d",
 	     String_CString(msg->tag), contLen, bodyLen);
     }
@@ -2345,7 +2358,7 @@ int ProcessDovecotFromSpaceBugBody(Parser *par, int endPos,
     if (bodyParts != NULL)
 	Parse_StringStart(par, &part);
 
-    // Dovecot isn't very strict about what's preceeding a legal "From "
+    // Dovecot isn't very stringent about what's preceeding a legal "From "
     // line, so just look for a single newline instead of two.
     //
     // Don't forget that the first line may be a valid "From " line too, so
@@ -3320,6 +3333,7 @@ bool User_AskLine(const char *prompt, const String **pLine, bool trim)
 	int len = strlen(buf);
 	if (len > 0 && buf[len-1] == '\n')
 	    len--;
+	buf[len] = '\0';
 	String_Set(&line, buf, len);
 	if (trim)
 	    String_TrimSpaces(&line);
@@ -3597,14 +3611,15 @@ bool ShouldRepair(RepairState *state)
     return choice == 'y';
 }
 
-void CheckMailbox(Mailbox *mbox, bool strict, bool repair)
+void CheckMailbox(Mailbox *mbox, bool stringent, bool repair)
 {
     Message *msg;
     RepairState state;
 
     InitRepairState(&state, repair);
 
-    for (msg = Mailbox_Root(mbox); msg != NULL && !state.quit; msg = msg->next) {
+    for (msg = Mailbox_Root(mbox); msg != NULL && !state.quit;
+	 msg = msg->next) {
 	String *value;
 	const String *source = NULL;
 	int cllen;
@@ -3651,6 +3666,11 @@ void CheckMailbox(Mailbox *mbox, bool strict, bool repair)
 	}
 	if (state.quit)
 	    break;
+
+	// Only stringent tests below
+	//
+	if (!stringent)
+	    continue;
 
 	// Got From?
 	//
@@ -3752,56 +3772,51 @@ void CheckMailbox(Mailbox *mbox, bool strict, bool repair)
 
 	// Got Message-ID?
 	//
-	if (strict) {
-	    value = Header_Get(msg->headers, &Str_MessageID);
-	    if (value == NULL) {
-		source = &Str_XMessageID;
-		value = Header_Get(msg->headers, source);
+	value = Header_Get(msg->headers, &Str_MessageID);
+	if (value == NULL) {
+	    source = &Str_XMessageID;
+	    value = Header_Get(msg->headers, source);
 
-		if (value == NULL) {
-		    Warn("Message %s: Missing Message-ID: header",
-			 String_CString(msg->tag));
-		}
+	    if (value == NULL) {
+		Warn("Message %s: Missing Message-ID: header",
+		     String_CString(msg->tag));
 	    }
 	}
 
 	// Make sure there's no (undeclared) binary data in headers or body
 	//
-	if (strict) {
-	    Header *head;
+	Header *head;
 
-	    for (head = msg->headers->root; head != NULL;
-		 head = head->next) {
-		int pos = FindIllegalChar(head->line, false, false);
-		if (pos >= 0) {
-		    Warn("Message %s: Illegal character %s in header:\n"
-			 " %s", String_CString(msg->tag),
-			 Char_QuotedCString(String_CharAt(head->line, pos)),
-			 String_PrettyCString(head->line));
-		}
+	for (head = msg->headers->root; head != NULL; head = head->next) {
+	    int pos = FindIllegalChar(head->line, false, false);
+	    if (pos >= 0) {
+		Warn("Message %s: Illegal character %s in header:\n"
+		     " %s", String_CString(msg->tag),
+		     Char_QuotedCString(String_CharAt(head->line, pos)),
+		     String_PrettyCString(head->line));
 	    }
+	}
 
 #if 0 // Need to check multipart headers!
-	    String *cte =
-		Header_Get(msg->headers, &Str_ContentTransferEncoding);
-	    if (cte == NULL || !String_HasPrefix(cte, &Str_Binary, false)) {
-		String *body = Message_Body(msg);
+	String *cte =
+	    Header_Get(msg->headers, &Str_ContentTransferEncoding);
+	if (cte == NULL || !String_HasPrefix(cte, &Str_Binary, false)) {
+	    String *body = Message_Body(msg);
+	    
+	    bool is8Bit = String_HasPrefix(cte, &Str_8Bit, false);
+	    int pos = FindIllegalChar(body, true, is8Bit);
+	    if (pos >= 0) {
+		int off = iMax(0, pos - kString_ExcerptLength / 2);
+		String *sub = String_Sub(body, off, String_Length(body));
 
-		bool is8Bit = String_HasPrefix(cte, &Str_8Bit, false);
-		int pos = FindIllegalChar(body, true, is8Bit);
-		if (pos >= 0) {
-		    int off = iMax(0, pos - kString_ExcerptLength / 2);
-		    String *sub = String_Sub(body, off, String_Length(body));
-
-		    Warn("Message %s: Illegal character %s in body:\n %s%s",
-			 String_CString(msg->tag),
-			 Char_QuotedCString(String_CharAt(body, pos)),
-			 off == 0 ? "" : "...",
-			 String_QuotedCString(sub, kString_ExcerptLength));
-		}
+		Warn("Message %s: Illegal character %s in body:\n %s%s",
+		     String_CString(msg->tag),
+		     Char_QuotedCString(String_CharAt(body, pos)),
+		     off == 0 ? "" : "...",
+		     String_QuotedCString(sub, kString_ExcerptLength));
 	    }
-#endif
 	}
+#endif
     }
 }
 
@@ -3882,7 +3897,7 @@ bool Message_Split(Message *msg, bool interactively)
 }
 
 #if 0
-void CheckContentLengths(Message *msg, bool strict, bool repair)
+void CheckContentLengths(Message *msg, bool stringent, bool repair)
 {
     for (; msg != NULL; msg = msg->next) {
 	String *value = Header_Get(msg->headers, &Str_ContentLength);
@@ -3905,7 +3920,7 @@ void CheckContentLengths(Message *msg, bool strict, bool repair)
 			   String_PrintF("%d", bodlen));
 
 	    } else {
-		if (strict)
+		if (stringent)
 		    Warn("Message %s: Missing Content-Length: header",
 			 String_CString(msg->tag));
 	    }
@@ -4415,7 +4430,7 @@ typedef enum {
     kCmd_ShowPrevious,
     kCmd_ShowNext,
     kCmd_Split,
-    kCmd_Strict,
+    kCmd_Stringent,
     kCmd_Undelete,
     kCmd_Unique,
     kCmd_Write,
@@ -4446,7 +4461,7 @@ CommandTable kCommandTable[] = {
      "go to the next message and display it"},
     {"-",	NULL,		kCmd_ShowPrevious,
      "go to the previous message and display it"},
-    {"check",	"[strict]",	kCmd_Check,
+    {"check",	"[stringent]",	kCmd_Check,
      "check the mailbox' internal consistency"},
     {"delete",	"[<msgs>]",	kCmd_Delete,
      "mark one or more messages as deleted"},
@@ -4474,14 +4489,14 @@ CommandTable kCommandTable[] = {
      "display the contents of the given message(s)"},
     {"quit",	NULL,		kCmd_Exit,
      "leave the mailbox without saving any changes"},
-    {"repair",	"[strict]",	kCmd_Repair,
+    {"repair",	"[stringent]",	kCmd_Repair,
      "check the mailbox' internal state and repair if needed"},
     {"save",	"[<msgs>] <file>", kCmd_Save,
      "save the messages to the given file"},
     {"split",	"[<msgs>]",	kCmd_Split,
      "look for 'From ' lines in the messages and split them"},
-    {"strict",	"[<on-or-off>]", kCmd_Strict,
-     "set/show 'strict' mode when checking mailboxes"},
+    {"stringent",	"[<on-or-off>]", kCmd_Stringent,
+     "set/show 'stringent' mode when checking mailboxes"},
     {"undelete", "[<msgs>]",	kCmd_Undelete,
      "undelete one or more messages"},
     {"unique",	NULL,		kCmd_Unique,
@@ -4873,30 +4888,30 @@ void RunLoop(Mailbox *mbox, Array *commands)
 	    ListMailbox(gStdOut, mbox, cur, gPageHeight - 1);
 	    break;
 
-	  case kCmd_Strict:
+	  case kCmd_Stringent:
 	    arg = NextArg(&argi, args, false);
 	    if (!NoNextArg(&argi, args))
 		break;
-	    gStrict = TrueString(arg, !gStrict);
-	    Note("Strict checking mode is turned %s", gStrict ? "on" : "off");
+	    gStringent = TrueString(arg, !gStringent);
+	    Note("Stringent checking mode is turned %s", gStringent ? "on" : "off");
 	    break;
 
 	  case kCmd_Check:
 	    arg = NextArg(&argi, args, false);
 	    if (!NoNextArg(&argi, args))
 		break;
-	    if (String_HasPrefix(arg, &Str_Strict, false))
+	    if (String_HasPrefix(arg, &Str_Stringent, false))
 		arg = &Str_True;
-	    CheckMailbox(mbox, TrueString(arg, gStrict), false);
+	    CheckMailbox(mbox, TrueString(arg, gStringent), false);
 	    break;
 
 	  case kCmd_Repair:
 	    arg = NextArg(&argi, args, false);
 	    if (!NoNextArg(&argi, args))
 		break;
-	    if (String_HasPrefix(arg, &Str_Strict, false))
+	    if (String_HasPrefix(arg, &Str_Stringent, false))
 		arg = &Str_True;
-	    CheckMailbox(mbox, TrueString(arg, gStrict), true);
+	    CheckMailbox(mbox, TrueString(arg, gStringent), true);
 	    break;
 
 	  case kCmd_Unique:
@@ -5092,32 +5107,36 @@ void Usage(const char *pname, bool help)
 		"  -f <file> \tprocess mbox <file>\n"
 		"  -h \t\tprint out this help text\n"
 		"  -i \t\tinitiate interactive mode\n"
-		"  -n \t\tdry run -- no changes will be made to the mailboxes\n"
+		"  -n \t\tdry run -- no changes will be made to any file\n"
 		"  -o <file> \tconcatenate messages into <file>\n"
 		"  -q \t\tbe quiet and don't report warnings or notices\n"
 		"  -r \t\trepair the given mailboxes\n"
-		"  -s \t\tbe strict and report more indiscretions than otherwise\n"
+		"  -s \t\tbe stringent and report more indiscretions than otherwise\n"
 		"  -u \t\tunique messages in each mailbox by removing duplicates\n"
 		"  -v \t\tbe verbose and print out more progress information\n"
 		"  -C \t\tshow a few lines of context around parse errors\n"
 		"  -N \t\tdon't try to mmap the mbox file\n"
-		);
+		"  -V \t\tprint out %s version information and then exit\n",
+		pname);
 	fprintf(stderr, "\nIf given no options, %s will simply to try read "
 		"the given mbox files\nand then quit. ", pname);
 
-	fprintf(stderr, "More interestion examples might be:\n\n");
+	fprintf(stderr, "More interesting usage examples would be:\n\n");
 	fprintf(stderr, "%s -c mbox\tto check the mbox file and report "
-		"any inconsistencies\n", pname);
-	fprintf(stderr, "%s -rb mbox\tto check mbox' consistency, perform "
-		"any necessary repairs,\n\t\tand save the original file as "
+		"most errors\n", pname);
+	fprintf(stderr, "%s -cs mbox\tto check the mbox file and report "
+		"more errors\n", pname);
+	fprintf(stderr, "%s -rb mbox\tto check the mbox, perform any "
+		"necessary repairs, and save\n\t\tthe original file as "
 		"mbox~\n", pname);
-	fprintf(stderr, "%s -ci mbox\tto check mbox' consistency and then "
-		"enter interactive mode\n\t\twhere you can further inspect "
+	fprintf(stderr, "%s -ci mbox\tto check the mbox and then enter an "
+		"interactive mode where\n\t\tyou can further inspect it "
 		"and make possible changes\n", pname);
 	fprintf(stderr, "\nIf you just want to test things out without making "
-		"any changes at all,\nadd the -n flag too.\n");
+		"any changes, add the -n\nflag and no files will be "
+		"modified.\n");
     } else {
-	fprintf(stderr, "(Run: \"%s -h\" for more information)\n", pname);
+	fprintf(stderr, " (Run \"%s -h\" for more information)\n", pname);
     }
 
     Exit(EX_USAGE);
@@ -5140,6 +5159,48 @@ void Exit(int ret)
 {
     Mailbox_UnlockAll();
     exit(ret);
+}
+
+// Add all "unhidden" files at or below path to the given array.
+// Returns # of errors.
+//
+int AddFiles(Array *files, String *path)
+{
+    const char *cPath = String_CString(path);
+    struct stat sbuf;
+    int errors = 0;
+
+    if (stat(cPath, &sbuf) != 0) {
+	perror(cPath);
+	return 1;
+    }
+
+    if (S_ISDIR(sbuf.st_mode)) {
+	DIR *dir = opendir(cPath);
+	struct dirent *de;
+
+	if (dir == NULL) {
+	    perror(cPath);
+	    return 1;
+	}
+
+	while ((de = readdir(dir)) != NULL) {
+	    // Ignore ./.. and any other .file
+	    if (de->d_name[0] == '.')
+		continue;
+
+	    // XXX: Will leak strings here...
+	    errors +=
+		AddFiles(files, String_PrintF("%s/%s", cPath, de->d_name));
+	}
+
+	closedir(dir);
+
+    } else {
+	Array_Append(files, path);
+    }
+
+    return errors;
 }
 
 int main(int argc, char **argv)
@@ -5174,6 +5235,10 @@ int main(int argc, char **argv)
     signal(SIGBUS, InterruptHandler);
     signal(SIGSEGV, InterruptHandler);
     signal(SIGTERM, InterruptHandler);
+
+    // Give usage if no arguments at all were given
+    if (argc == 1)
+	Usage(argv[0], false);
 
     for (ac = 1; ac < argc && argv[ac][0] == '-'; ac++) {
 	if (argv[ac][1] == '-') {
@@ -5210,7 +5275,9 @@ int main(int argc, char **argv)
 		  case 'd': gDebug = true; break;
 #endif
 		  case 'f':
-		    Array_Append(files, NextMainArg(&ac, argc, argv)); break;
+		    if (AddFiles(files, NextMainArg(&ac, argc, argv)) != 0)
+			Exit(1);
+		    break;
 		  case 'h': Usage(argv[0], true); break;
 		  case 'i': gInteractive = true; break;
 		    //case 'l': gAddContentLength = true; break;
@@ -5218,7 +5285,7 @@ int main(int argc, char **argv)
 		  case 'o': outFile = NextMainArg(&ac, argc, argv); break;
 		  case 'q': gQuiet = true; break;
 		  case 'r': Array_Append(commands, &Str_Repair); break;
-		  case 's': gStrict = true; break;
+		  case 's': gStringent = true; break;
 		  case 'u': Array_Append(commands, &Str_Unique); break;
 		  case 'v': gVerbose = true; break;
 		  case 'w': gAutoWrite= true; break;
@@ -5230,19 +5297,20 @@ int main(int argc, char **argv)
 		}
 	    }
 	}
-
     }
 
     if (outFile != NULL && !gDryRun) {
 	output = Stream_Open(outFile, true, true);
     }
 
-    for (; ac < argc; ac++) {
-	Array_Append(files, String_FromCString(argv[ac], false));
-    }
+    // The rest should all be mbox files (or directories thereof)
+    if (ac < argc) {
+	for (; ac < argc; ac++) {
+	    errors += AddFiles(files, String_FromCString(argv[ac], false));
+	}
 
-#ifdef DEFAULT_TO_INBOX
-    if (Array_Count(files) == 0) {
+	// Default to the user's inbox if no explicit files were given
+    } else if (Array_Count(files) == 0) {
 	const char *cMail = getenv("MAIL");
 	String *mailFile;
 
@@ -5253,13 +5321,10 @@ int main(int argc, char **argv)
 	    mailFile = String_PrintF("/var/mail/%s", getenv("LOGNAME"));
 	}
 
-	Array_Append(files, mailFile);
+	errors += AddFiles(files, mailFile);
     }
-#else
-    if (Array_Count(files) == 0)
-	Usage(argv[0], false);
-#endif
 
+    // Process the mbox files
     for (i = 0; i < Array_Count(files); i++) {
 	if (!ProcessFile(Array_GetAt(files, i), commands, output))
 	    errors++;

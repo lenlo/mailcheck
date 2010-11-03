@@ -2,7 +2,6 @@
 **  mfck -- A mailbox checking tool (and more!)
 **
 **  Copyright (c) 2008-2010 by Lennart Lovstrand <mfck@lenlolabs.com>
-**
 */
 
 #include <stdio.h>
@@ -161,305 +160,310 @@ String_Define(Str_TwoDashes, "--");
 String_Define(Str_Bcc, "bcc");
 String_Define(Str_Cc, "cc");
 String_Define(Str_ContentLength, "Content-Length");
- String_Define(Str_ContentTransferEncoding, "Content-Transfer-Encoding");
- String_Define(Str_ContentType, "Content-Type");
- String_Define(Str_Date, "Date");
- String_Define(Str_From, "From");
- String_Define(Str_FromSpace, "From ");
- String_Define(Str_MessageID, "Message-ID");
- String_Define(Str_NL2FromSpace, "\n\nFrom ");
- String_Define(Str_NLFromSpace, "\nFrom ");
- String_Define(Str_Received, "Received");
- String_Define(Str_ReturnPath, "Return-Path");
- String_Define(Str_Sender, "Sender");
- String_Define(Str_Status, "Status");
- String_Define(Str_Subject, "Subject");
- String_Define(Str_To, "To");
- String_Define(Str_XDate, "X-Date");
- String_Define(Str_XFrom, "X-From");
- String_Define(Str_XIMAP, "X-IMAP");
- String_Define(Str_XIMAPBase, "X-IMAPBase");
- String_Define(Str_XKeywords, "X-Keywords");
- String_Define(Str_XMessageID, "X-Message-ID");
- String_Define(Str_XUID, "X-UID");
+String_Define(Str_ContentTransferEncoding, "Content-Transfer-Encoding");
+String_Define(Str_ContentType, "Content-Type");
+String_Define(Str_Date, "Date");
+String_Define(Str_From, "From");
+String_Define(Str_FromSpace, "From ");
+String_Define(Str_MessageID, "Message-ID");
+String_Define(Str_NL2FromSpace, "\n\nFrom ");
+String_Define(Str_NLFromSpace, "\nFrom ");
+String_Define(Str_Received, "Received");
+String_Define(Str_ReturnPath, "Return-Path");
+String_Define(Str_Sender, "Sender");
+String_Define(Str_Status, "Status");
+String_Define(Str_Subject, "Subject");
+String_Define(Str_To, "To");
+String_Define(Str_XDate, "X-Date");
+String_Define(Str_XFrom, "X-From");
+String_Define(Str_XIMAP, "X-IMAP");
+String_Define(Str_XIMAPBase, "X-IMAPBase");
+String_Define(Str_XKeywords, "X-Keywords");
+String_Define(Str_XMessageID, "X-Message-ID");
+String_Define(Str_XUID, "X-UID");
 
- // Content-Transfer-Encodings
- String_Define(Str_Binary, "binary");
- String_Define(Str_8Bit, "8bit");
+// Content-Transfer-Encodings
+String_Define(Str_Binary, "binary");
+String_Define(Str_8Bit, "8bit");
 
- // Content-Types (and parameters)
- String_Define(Str_Multipart, "multipart");
- String_Define(Str_Boundary, "boundary");
+// Content-Types (and parameters)
+String_Define(Str_Multipart, "multipart");
+String_Define(Str_Boundary, "boundary");
 
- // Other Strings
- String_Define(Str_All, "all");
- String_Define(Str_Check, "check");
- String_Define(Str_Repair, "repair");
- String_Define(Str_Unique, "unique");
+// Other Strings
+String_Define(Str_All, "all");
+String_Define(Str_Check, "check");
+String_Define(Str_Repair, "repair");
+String_Define(Str_Unique, "unique");
 
- String_Define(Str_EnvelopeDate, "envelope date");
- String_Define(Str_EnvelopeSender, "envelope sender");
+String_Define(Str_EnvelopeDate, "envelope date");
+String_Define(Str_EnvelopeSender, "envelope sender");
 
- String_Define(Str_Plus, "+");
- String_Define(Str_Minus, "-");
+String_Define(Str_Plus, "+");
+String_Define(Str_Minus, "-");
 
- String_Define(Str_True, "true");
- String_Define(Str_Strict, "strict");
+String_Define(Str_True, "true");
+String_Define(Str_Strict, "strict");
 
- String_Define(Str_DotLock, ".lock");
+String_Define(Str_DotLock, ".lock");
 
- /*
- **  Global Variables
+/*
+**  Global Variables
+*/
+
+bool gAddContentLength = false;
+bool gAutoWrite = false;
+bool gBackup = false;
+bool gCheck = false;
+#ifdef DEBUG
+bool gDebug = false;
+#endif
+bool gDryRun = false;
+bool gInteractive = false;
+bool gMap = true;
+bool gShowContext = false;
+bool gStrict = false;
+bool gQuiet = false;
+bool gUnique = false;
+bool gVerbose = false;
+
+int gWarnings = 0;
+int gMessageCounter = 0;
+String *gPager = NULL;
+Stream *gStdOut;
+int gPageWidth = kDefaultPageWidth;
+int gPageHeight = kDefaultPageHeight;
+
+jmp_buf *gInterruptReentry = NULL;
+FILE *gOpenPipe = NULL;
+
+const char gVersion[] = "mfck version 1.0";
+const char gRevision[] = "$Rev$";
+const char gCopyright[] =
+    "Copyright (c) 2008-2010, Lennart Lovstrand <mfck@lenlolabs.com>";
+
+/*
+**  Forward Declarations
+*/
+
+void Exit(int ret);
+
+/*
+**  Math Functions
+*/
+
+inline int iMin(int a, int b)	{return a < b ? a : b;}
+inline int iMax(int a, int b)	{return a > b ? a : b;}
+
+/*
+**  Char Functions
+*/
+
+inline bool Char_IsNewline(int ch)	{return ch == '\r' || ch == '\n';}
+
+const char *Char_QuotedCString(char ch)
+{
+    static char buf[10];
+
+    if (ch < ' ' || ch > '~') {
+	switch (ch) {
+	  case '\t': return "'\\t'";
+	  case '\n': return "'\\n'";
+	  case '\r': return "'\\r'";
+	  default:
+	    sprintf(buf, "'\\%03o'", ch & 0xff);
+	    return buf;
+	}
+    } else if (ch == '\'') {
+	return "'\\''";
+
+    } else {
+	sprintf(buf, "'%c'", ch);
+	return buf;
+    }
+}
+
+// Scale the size to the appropriate K-based unit
+//
+double NormalizeSize(size_t size, char *pSuffix)
+{
+    double fsize = size;
+    char *suffix = "KMGT";
+
+    fsize /= 1024;
+
+    while (fsize > 999 && suffix[1] != '\0') {
+	fsize /= 1024;
+	suffix++;
+    }
+
+    if (pSuffix != NULL)
+	*pSuffix = *suffix;
+
+    return fsize;
+}
+
+/*
+**  Error & Notification Functions
+**
+**  Note that calling Error will exit the program.
+*/
+
+void Note(const char *fmt, ...)
+{
+    va_list args;
+
+    va_start(args, fmt);
+    if (!gQuiet) {
+	fprintf(stdout, "[");
+	vfprintf(stdout, fmt, args);
+	fprintf(stdout, "]\n");
+    }
+    va_end(args);
+}
+
+void WarnV(const char *fmt, va_list args)
+{
+    if (!gQuiet) {
+	fprintf(stdout, "%%");
+	vfprintf(stdout, fmt, args);
+	fprintf(stdout, "\n");
+    }
+
+    gWarnings++;
+}
+
+void Warn(const char *fmt, ...)
+{
+    va_list args;
+
+    va_start(args, fmt);
+    WarnV(fmt, args);
+    va_end(args);
+}
+
+void Error(const char *fmt, ...)
+{
+    va_list args;
+
+    va_start(args, fmt);
+    fprintf(stderr, "?");
+    vfprintf(stderr, fmt, args);
+    fprintf(stderr, "\n");
+    va_end(args);
+}
+
+void Fatal(int err, const char *fmt, ...)
+{
+    va_list args;
+
+    va_start(args, fmt);
+    fprintf(stderr, "?Fatal Error: ");
+    vfprintf(stderr, fmt, args);
+    fprintf(stderr, "\n");
+    va_end(args);
+
+    if (err != EX_OK)
+	Exit(err);
+}
+
+/* Show n lines of context around the given position.
  */
+void ShowContext(const char *text, int length, int pos)
+{
+    int b, e, i, count;
 
- bool gAddContentLength = false;
- bool gAutoWrite = false;
- bool gBackup = false;
- bool gCheck = false;
- #ifdef DEBUG
- bool gDebug = false;
- #endif
- bool gDryRun = false;
- bool gInteractive = false;
- bool gMap = true;
- bool gShowContext = false;
- bool gStrict = false;
- bool gQuiet = false;
- bool gUnique = false;
- bool gVerbose = false;
+    for (b = pos, count = kContext_LineCount + 1; b > 0 && count > 0; b--) {
+	if (Char_IsNewline(text[b]))
+	    count--;
+    }
+    // Point to just after the newline
+    if (count == 0)
+	b += 2;
 
- int gWarnings = 0;
- int gMessageCounter = 0;
- String *gPager = NULL;
- Stream *gStdOut;
- int gPageWidth = kDefaultPageWidth;
- int gPageHeight = kDefaultPageHeight;
+    for (e = pos, count = kContext_LineCount; e < length && count > 0; e++) {
+	if (Char_IsNewline(text[e]))
+	    count--;
+    }
+    // Point to just after the newline
+    if (count == 0 && e < length && Char_IsNewline(text[e]))
+	e++;
 
- jmp_buf *gInterruptReentry = NULL;
- FILE *gOpenPipe = NULL;
+    for (i = b; i < e; i++) {
+	if (i == b || text[i-1] == '\n')
+	    fputs("] ", stderr);
+	/*
+	if (i == pos)
+	    fputs("<here>", stderr);
+	*/
+	putc(text[i], stderr);
+    }
+}
 
- /*
- **  Forward Declarations
- */
+/*
+**  Memory Functions
+**
+**  Note that all memory allocations are guaranteed to succeed
+**  or else abort the running program with an error.
+**
+**  Also note that it's OK to (re)alloc and free a NULL memory
+**  pointer.  (The right thing will happen.)
+**/
 
- void Exit(int ret);
+void xfree(void *mem)
+{
+    if (mem != NULL)
+	free(mem);
+}
 
- /*
- **  Math Functions
- */
+void *xalloc(void *mem, size_t size)
+{
+    if (mem == NULL)
+	mem = malloc(size);
+    else
+	mem = realloc(mem, size);
 
- inline int iMin(int a, int b)	{return a < b ? a : b;}
- inline int iMax(int a, int b)	{return a > b ? a : b;}
+    if (mem == NULL && size == 0) {
+	// Sigh, some mallocs don't like it when you ask them for zero bytes
+	xfree(mem);
+	mem = malloc(1);
+    }
 
- /*
- **  Char Functions
- */
+    if (mem == NULL)
+	Fatal(EX_UNAVAILABLE, "Out of memory when trying to allocate %u bytes",
+	      size);
 
- inline bool Char_IsNewline(int ch)	{return ch == '\r' || ch == '\n';}
+    return mem;
+}
 
- const char *Char_QuotedCString(char ch)
- {
-     static char buf[10];
+/*
+**  String Functions
+**
+**  Strings are arrays of chars with a specific length.  Note that unlike
+**  C-strings, they aren't necessarily null terminated.  To get a (temporary)
+**  null terminated string, use String_CString or one of its siblings.
+**
+**  The String's underlying chars can be shared (never freed by String_Free),
+**  allocated (freed by Sting_Free), mapped (unmapped by String_Free),
+**  or by part of compiled in constant memory (never freed by String_Free,
+**  nor is the actual String * pointer).  Note that the latter makes it
+**  harmless to call String_Free with a compiled-in string constant.
+**  (This fact is used among other places in Header_Free when freeing they
+**  header's keys, which often will be compiled in Str_ constants.)
+**
+**  It is very common for strings to share memory with other strings.  No
+**  reference counting is performed, so it's up to the caller to make sure
+**  that the memory owning strings doesn't get freed as long as there are
+**  refereces still in use to its chars.
+*/
 
-     if (ch < ' ' || ch > '~') {
-	 switch (ch) {
-	   case '\t': return "'\\t'";
-	   case '\n': return "'\\n'";
-	   case '\r': return "'\\r'";
-	   default:
-	     sprintf(buf, "'\\%03o'", ch & 0xff);
-	     return buf;
-	 }
-     } else if (ch == '\'') {
-	 return "'\\''";
+inline const char *String_Chars(const String *str)
+{
+    return str == NULL ? NULL : str->buf;
+}
 
-     } else {
-	 sprintf(buf, "'%c'", ch);
-	 return buf;
-     }
- }
-
- // Scale the size to the appropriate K-based unit
- //
- double NormalizeSize(size_t size, char *pSuffix)
- {
-     double fsize = size;
-     char *suffix = "KMGT";
-
-     fsize /= 1024;
-
-     while (fsize > 999 && suffix[1] != '\0') {
-	 fsize /= 1024;
-	 suffix++;
-     }
-
-     if (pSuffix != NULL)
-	 *pSuffix = *suffix;
-
-     return fsize;
- }
-
- /*
- **  Error & Notification Functions
- **
- **  Note that calling Error will exit the program.
- */
-
- void Note(const char *fmt, ...)
- {
-     va_list args;
-
-     va_start(args, fmt);
-     if (!gQuiet) {
-	 fprintf(stdout, "[");
-	 vfprintf(stdout, fmt, args);
-	 fprintf(stdout, "]\n");
-     }
-     va_end(args);
- }
-
- void WarnV(const char *fmt, va_list args)
- {
-     if (!gQuiet) {
-	 fprintf(stdout, "%%");
-	 vfprintf(stdout, fmt, args);
-	 fprintf(stdout, "\n");
-     }
-
-     gWarnings++;
- }
-
- void Warn(const char *fmt, ...)
- {
-     va_list args;
-
-     va_start(args, fmt);
-     WarnV(fmt, args);
-     va_end(args);
- }
-
- void Error(const char *fmt, ...)
- {
-     va_list args;
-
-     va_start(args, fmt);
-     fprintf(stderr, "?");
-     vfprintf(stderr, fmt, args);
-     fprintf(stderr, "\n");
-     va_end(args);
- }
-
- void Fatal(int err, const char *fmt, ...)
- {
-     va_list args;
-
-     va_start(args, fmt);
-     fprintf(stderr, "?Fatal Error: ");
-     vfprintf(stderr, fmt, args);
-     fprintf(stderr, "\n");
-     va_end(args);
-
-     if (err != EX_OK)
-	 Exit(err);
- }
-
- /* Show n lines of context around the given position.
-  */
- void ShowContext(const char *text, int length, int pos)
- {
-     int b, e, i, count;
-
-     for (b = pos, count = kContext_LineCount + 1; b > 0 && count > 0; b--) {
-	 if (Char_IsNewline(text[b]))
-	     count--;
-     }
-     // Point to just after the newline
-     if (count == 0)
-	 b += 2;
-
-     for (e = pos, count = kContext_LineCount; e < length && count > 0; e++) {
-	 if (Char_IsNewline(text[e]))
-	     count--;
-     }
-     // Point to just after the newline
-     if (count == 0 && e < length && Char_IsNewline(text[e]))
-	 e++;
-
-     for (i = b; i < e; i++) {
-	 if (i == b || text[i-1] == '\n')
-	     fputs("] ", stderr);
-	 /*
-	 if (i == pos)
-	     fputs("<here>", stderr);
-	 */
-	 putc(text[i], stderr);
-     }
- }
-
- /*
- **  Memory Functions
- **
- **  Note that all memory allocations are guaranteed to succeed
- **  or else abort the running program with an error.
- **
- **  Also note that it's OK to (re)alloc and free a NULL memory
- **  pointer.  (The right thing will happen.)
- **/
-
- void xfree(void *mem)
- {
-     if (mem != NULL)
-	 free(mem);
- }
-
- void *xalloc(void *mem, size_t size)
- {
-     if (mem == NULL)
-	 mem = malloc(size);
-     else
-	 mem = realloc(mem, size);
-
-     if (mem == NULL && size == 0) {
-	 // Sigh, some mallocs don't like it when you ask them for zero bytes
-	 xfree(mem);
-	 mem = malloc(1);
-     }
-
-     if (mem == NULL)
-	 Fatal(EX_UNAVAILABLE, "Out of memory when trying to allocate %u bytes",
-	       size);
-
-     return mem;
- }
-
- /*
- **  String Functions
- **
- **  Strings are arrays of chars with a specific length.  Note that unlike
- **  C-strings, they aren't necessarily null terminated.  To get a (temporary)
- **  null terminated string, use String_CString or one of its siblings.
- **
- **  The String's underlying chars can be shared (never freed by String_Free),
- **  allocated (freed by Sting_Free), mapped (unmapped by String_Free),
- **  or by part of compiled in constant memory (never freed by String_Free,
- **  nor is the actual String * pointer).  Note that the latter makes it
- **  harmless to call String_Free with a compiled-in string constant.
- **  (This fact is used among other places in Header_Free when freeing they
- **  header's keys, which often will be compiled in Str_ constants.)
- **
- **  It is very common for strings to share memory with other strings.  No
- **  reference counting is performed, so it's up to the caller to make sure
- **  that the memory owning strings doesn't get freed as long as there are
- **  refereces still in use to its chars.
- */
-
- inline const char *String_Chars(const String *str)
- {
-     return str == NULL ? NULL : str->buf;
- }
-
- inline int String_Length(const String *str)
- {
+inline int String_Length(const String *str)
+{
     return str == NULL ? 0 : str->len;
 }
 
@@ -3168,6 +3172,7 @@ Mailbox *Mailbox_Open(const String *source, bool create)
     Mailbox *mbox = Mailbox_OpenQuietly(source, create);
 
     if (mbox == NULL) {
+	Mailbox_Unlock(source);
 	Error("Could not open %s: %s",
 	      String_CString(source), strerror(errno));
 	return NULL;
@@ -5118,9 +5123,9 @@ void Usage(const char *pname, bool help)
     Exit(EX_USAGE);
 }
 
-void Help(const char *pname)
+void ShowVersion(void)
 {
-    
+    printf("%s (%s)\n%s\n", gVersion, gRevision, gCopyright);
 }
 
 String *NextMainArg(int *pAC, int argc, char **argv)
@@ -5183,6 +5188,9 @@ int main(int argc, char **argv)
 		gVerbose = true;
 	    } else if (strcmp(opt, "help") == 0) {
 		Usage(argv[0], true);
+	    } else if (strcmp(opt, "version") == 0) {
+		ShowVersion();
+		Exit(0);
 	    } else {
 		//Usage(argv[0]);
 		Array_Append(commands, String_FromCString(opt, false));
@@ -5213,6 +5221,7 @@ int main(int argc, char **argv)
 		  case 'w': gAutoWrite= true; break;
 		  case 'C': gShowContext = true; break;
 		  case 'N': gMap = false; break;
+		  case 'V': ShowVersion(); Exit(0); break;
 		  default:
 		    Usage(argv[0], false);
 		}
@@ -5264,7 +5273,7 @@ int main(int argc, char **argv)
     if (output != NULL)
 	Stream_Free(output, true);
 
-    return errors == 0;
+    return errors;
 }
 
 #ifdef DEBUG

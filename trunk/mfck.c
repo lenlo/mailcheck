@@ -5127,7 +5127,7 @@ void ShowVersion(void)
 {
     int rev = -1;
 
-    sscanf(gRevision, "$Rev$", &rev);
+    sscanf(gRevision, "$Rev: %d", &rev);
     printf("%s (rev %d)\n%s\n", gVersion, rev, gCopyright);
 }
 

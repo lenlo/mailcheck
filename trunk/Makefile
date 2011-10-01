@@ -23,7 +23,14 @@ install:	$(TARGET)
 	install -c $(TARGET) $(DESTBIN)
 
 clean:
-	rm -rf $(TARGET) *.o TAGS
+	rm -rf $(TARGET) $(TARGET).tar.gz *.o TAGS
 
 tags:
 	etags $(TARGET).c
+
+tar pkg package:
+	rev=$$(awk '/const char gRevision/ {print $$6}' $(TARGET).c); \
+	mkdir $(TARGET)-$$rev; \
+	cp -p $(TARGET).c Makefile $(TARGET)-$$rev; \
+	tar -zcf $(TARGET).tar.gz $(TARGET)-$$rev; \
+	rm -rf $(TARGET)-$$rev

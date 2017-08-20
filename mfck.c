@@ -1827,8 +1827,8 @@ String *String_RFC822Date(struct tm *tm, bool withTimeZone)
 			     tm->tm_mday, String_CString(kMonths[tm->tm_mon]),
 			     tm->tm_year, tm->tm_hour, tm->tm_min, tm->tm_sec,
 			     tm->tm_gmtoff > 0 ? '+' : '-',
-			     abs(tm->tm_gmtoff / 3600),
-			     abs(tm->tm_gmtoff / 60 % 60));
+			     labs(tm->tm_gmtoff / 3600),
+			     labs(tm->tm_gmtoff / 60 % 60));
 }
 
 void Stream_WriteCTime(Stream *output, struct tm *tm)

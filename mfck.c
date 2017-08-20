@@ -214,7 +214,6 @@ String_Define(Str_DotLock, ".lock");
 **  Global Variables
 */
 
-bool gAddContentLength = false;
 bool gAutoWrite = false;
 bool gBackup = false;
 bool gCheck = false;
@@ -229,6 +228,7 @@ bool gStringent = false;
 bool gQuiet = false;
 bool gUnique = false;
 bool gVerbose = false;
+//bool gWantContentLength = false;
 
 int gWarnings = 0;
 int gMessageCounter = 0;
@@ -255,14 +255,14 @@ void Exit(int ret);
 **  Math Functions
 */
 
-inline int iMin(int a, int b)	{return a < b ? a : b;}
-inline int iMax(int a, int b)	{return a > b ? a : b;}
+static inline int iMin(int a, int b)	{return a < b ? a : b;}
+static inline int iMax(int a, int b)	{return a > b ? a : b;}
 
 /*
 **  Char Functions
 */
 
-inline bool Char_IsNewline(int ch)	{return ch == '\r' || ch == '\n';}
+static inline bool Char_IsNewline(int ch) {return ch == '\r' || ch == '\n';}
 
 const char *Char_QuotedCString(char ch)
 {
@@ -460,45 +460,47 @@ void *xalloc(void *mem, size_t size)
 **  refereces still in use to its chars.
 */
 
-inline const char *String_Chars(const String *str)
+static inline const char *String_Chars(const String *str)
 {
     return str == NULL ? NULL : str->buf;
 }
 
-inline int String_Length(const String *str)
+static inline int String_Length(const String *str)
 {
     return str == NULL ? 0 : str->len;
 }
 
-inline const char *String_End(const String *str)
+#ifdef NOT_CURRENTLY_USED
+static inline const char *String_End(const String *str)
 {
     return str == NULL ? NULL : str->buf + str->len;
 }
+#endif
 
-inline const String *String_Safe(String *str)
+static inline const String *String_Safe(String *str)
 {
     return str != NULL ? str : &Str_Emtpy;
 }
 
-inline void String_SetChars(String *str, const char *buf)
+static inline void String_SetChars(String *str, const char *buf)
 {
     str->buf = buf;
 }
 
-inline void String_SetLength(String *str, int len)
+static inline void String_SetLength(String *str, int len)
 {
     str->len = len;
     if (str->type == kString_Alloced)
 	((char *) str->buf)[len] = '\0';
 }
 
-inline void String_Set(String *str, const char *buf, int len)
+static inline void String_Set(String *str, const char *buf, int len)
 {
     str->buf = buf;
     str->len = len;
 }
 
-inline String *String_New(StringType type, const char *chars, int length)
+static inline String *String_New(StringType type, const char *chars, int length)
 {
     String *str = New(String);
     String_Set(str, chars, length);
@@ -506,14 +508,14 @@ inline String *String_New(StringType type, const char *chars, int length)
     return str;
 }
 
-inline int String_CharAt(const String *str, int pos)
+static inline int String_CharAt(const String *str, int pos)
 {
     if (pos < 0 || pos >= String_Length(str))
 	return EOF;
     return String_Chars(str)[pos];
 }
 
-inline String *String_Sub(const String *str, int start, int end)
+static inline String *String_Sub(const String *str, int start, int end)
 {
     return String_New(kString_Shared, String_Chars(str) + start, end - start);
 }
@@ -610,13 +612,14 @@ String *String_Append(const String *sub, ...)
 
 // Change the string by adjusting its start and length
 //
-inline void String_Adjust(String *str, int offset)
+static inline void String_Adjust(String *str, int offset)
 {
     str->buf += offset;
     str->len -= offset;
 }
 
-inline bool String_IsEqual(const String *a, const String *b, bool sameCase)
+static inline bool String_IsEqual(const String *a, const String *b,
+				  bool sameCase)
 {
     if (String_Length(a) != String_Length(b))
 	return false;
@@ -626,8 +629,8 @@ inline bool String_IsEqual(const String *a, const String *b, bool sameCase)
 	strncasecmp(String_Chars(a), String_Chars(b), String_Length(b)) == 0;
 }
 
-inline bool String_HasPrefix(const String *str, const String *sub,
-			     bool sameCase)
+static inline bool String_HasPrefix(const String *str, const String *sub,
+				    bool sameCase)
 {
     if (String_Length(str) < String_Length(sub))
 	return false;
@@ -638,7 +641,8 @@ inline bool String_HasPrefix(const String *str, const String *sub,
 		    String_Length(sub)) == 0;
 }
 
-inline int String_Compare(const String *a, const String *b, bool sameCase)
+static inline int String_Compare(const String *a, const String *b,
+				 bool sameCase)
 {
     const char *ap, *bp;
     int i, minlen = iMin(String_Length(a), String_Length(b));
@@ -654,15 +658,17 @@ inline int String_Compare(const String *a, const String *b, bool sameCase)
     return String_Length(a) - String_Length(b);
 }
 
-inline int String_CompareCI(const String *a, const String *b)
+#ifdef NOT_CURRENTLY_USED
+static inline int String_CompareCI(const String *a, const String *b)
 {
     return String_Compare(a, b, false);
 }
 
-inline int String_CompareCS(const String *a, const String *b)
+static inline int String_CompareCS(const String *a, const String *b)
 {
     return String_Compare(a, b, true);
 }
+#endif
 
 int _String_FindTwoChars(const String *str, char ach, char bch)
 {
@@ -761,7 +767,7 @@ int String_FindString(const String *str, const String *sub, bool sameCase)
     return -1;
 }
 
-inline int String_FindNewline(const String *str)
+static inline int String_FindNewline(const String *str)
 {
     return _String_FindTwoChars(str, '\r', '\n');
 }
@@ -955,7 +961,7 @@ int Array_Count(const Array *array)
     return array->count;
 }
 
-inline void _Array_CheckBounds(const Array *array, int ix)
+static inline void _Array_CheckBounds(const Array *array, int ix)
 {
     if (ix < 0 || ix >= Array_Count(array)) {
 	Fatal(EX_UNAVAILABLE, "Out of bounds reference to array %#lx at %d",
@@ -963,7 +969,7 @@ inline void _Array_CheckBounds(const Array *array, int ix)
     }
 }
 
-inline void *Array_GetAt(const Array *array, int ix)
+static inline void *Array_GetAt(const Array *array, int ix)
 {
     _Array_CheckBounds(array, ix);
     return array->items[ix];
@@ -3631,7 +3637,9 @@ void CheckMailbox(Mailbox *mbox, bool stringent, bool repair)
 
 	int bodyLength = Message_BodyLength(msg);
 
-	if (cllen != bodyLength) {
+	// Always care about incorrect Content-Lengths, but only
+	// care about missing ones if we're being stringent.
+	if (cllen != bodyLength && (value != NULL || stringent)) {
 	    // Got the Dovecot "From " bug?
 	    //
 	    if (msg->dovecotFromSpaceBug != kDFSB_None) {
@@ -4495,7 +4503,7 @@ CommandTable kCommandTable[] = {
      "save the messages to the given file"},
     {"split",	"[<msgs>]",	kCmd_Split,
      "look for 'From ' lines in the messages and split them"},
-    {"stringent",	"[<on-or-off>]", kCmd_Stringent,
+    {"stringent", "[<on/off>]", kCmd_Stringent,
      "set/show 'stringent' mode when checking mailboxes"},
     {"undelete", "[<msgs>]",	kCmd_Undelete,
      "undelete one or more messages"},
@@ -4893,14 +4901,15 @@ void RunLoop(Mailbox *mbox, Array *commands)
 	    if (!NoNextArg(&argi, args))
 		break;
 	    gStringent = TrueString(arg, !gStringent);
-	    Note("Stringent checking mode is turned %s", gStringent ? "on" : "off");
+	    Note("Stringent checking mode is turned %s",
+		 gStringent ? "on" : "off");
 	    break;
 
 	  case kCmd_Check:
 	    arg = NextArg(&argi, args, false);
 	    if (!NoNextArg(&argi, args))
 		break;
-	    if (String_HasPrefix(arg, &Str_Stringent, false))
+	    if (arg != NULL && String_HasPrefix(&Str_Stringent, arg, false))
 		arg = &Str_True;
 	    CheckMailbox(mbox, TrueString(arg, gStringent), false);
 	    break;
@@ -4909,7 +4918,7 @@ void RunLoop(Mailbox *mbox, Array *commands)
 	    arg = NextArg(&argi, args, false);
 	    if (!NoNextArg(&argi, args))
 		break;
-	    if (String_HasPrefix(arg, &Str_Stringent, false))
+	    if (arg != NULL && String_HasPrefix(&Str_Stringent, arg, false))
 		arg = &Str_True;
 	    CheckMailbox(mbox, TrueString(arg, gStringent), true);
 	    break;
@@ -5280,7 +5289,7 @@ int main(int argc, char **argv)
 		    break;
 		  case 'h': Usage(argv[0], true); break;
 		  case 'i': gInteractive = true; break;
-		    //case 'l': gAddContentLength = true; break;
+		    //case 'l': gWantContentLength = true; break;
 		  case 'n': gDryRun = true; break;
 		  case 'o': outFile = NextMainArg(&ac, argc, argv); break;
 		  case 'q': gQuiet = true; break;

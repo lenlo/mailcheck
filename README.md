@@ -11,11 +11,11 @@ Option		| Description
  -b		| backup mbox to mbox~ before changing it
  -c 		| check the mbox for consistency
  -d 		| debug mode (see source code)
- -f <file> 	| process mbox <file>
+ -f \<file\> 	| process mbox \<file\>
  -h 		| print out this help text
  -i 		| initiate interactive mode
  -n 		| dry run -- no changes will be made to any file
- -o <file> 	| concatenate messages into <file>
+ -o \<file\> 	| concatenate messages into \<file\>
  -q 		| be quiet and don't report warnings or notices
  -r 		| repair the given mailboxes
  -s 		| be stringent and report more indiscretions than otherwise

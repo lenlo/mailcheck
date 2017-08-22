@@ -33,7 +33,6 @@ Example		| Description
 `mfck -c mbox`	| check the mbox file and report most errors
 `mfck -cs mbox`	| check the mbox file and report more errors
 `mfck -rb mbox`	| check the mbox, perform any necessary repairs, and save the original file as mbox~
-`mfck -ci mbox`	| check the mbox and then enter an interactive mode where you can further inspect it and make possible changes
+`mfck -ci mbox`	| check the mbox and then enter an interactive mode where you can further inspect it
 
-If you just want to test things out without making any changes, add the -n
-flag and no files will be modified.
+If you just want to test things out without making any changes, add the -n flag and no files will be modified.

@@ -1,7 +1,7 @@
 #
 #	Makefile for mfck
 #
-#	Copyright (c) 2008-2010 by Lennart Lovstrand <mfck@lenlolabs.com>
+#	Copyright (c) 2008-2017 by Lennart Lovstrand <mfck@lenlolabs.com>
 #
 #	Add -DUSE_READLINE to the CFLAGS and -lreadline to LOADLIBES if you
 #	have the readline library available.
@@ -19,11 +19,16 @@ DESTBIN=	/usr/local/bin
 
 $(TARGET):
 
+mfck.c:		vers.h
+
+vers.h:		.git/index
+	echo "#define kRevision $$(git log --oneline | wc -l)" >$@
+
 install:	$(TARGET)
 	install -c $(TARGET) $(DESTBIN)
 
 clean:
-	rm -rf $(TARGET) $(TARGET).tar.gz *.o TAGS
+	rm -rf vers.h $(TARGET) $(TARGET).tar.gz *.o TAGS
 
 tags:
 	etags $(TARGET).c

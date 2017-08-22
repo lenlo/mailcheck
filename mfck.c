@@ -168,6 +168,7 @@ String_Define(Str_ContentType, "Content-Type");
 String_Define(Str_Date, "Date");
 String_Define(Str_From, "From");
 String_Define(Str_FromSpace, "From ");
+String_Define(Str_GTFromSpace, ">From ");
 String_Define(Str_MessageID, "Message-ID");
 String_Define(Str_NL2FromSpace, "\n\nFrom ");
 String_Define(Str_NLFromSpace, "\nFrom ");
@@ -2052,19 +2053,31 @@ bool Parse_Header(Parser *par, Header **phead)
 			    "headers {@%d}", Parser_Position(par));
 		return false;
 	    }
+	    /* Or is it a ">From" line?
+	     */
+	    if (String_IsEqual(head->key, &Str_GTFromSpace, true)) {
+		// Yup, complain & accept it.
+		Parser_Warn(par, "Encountered unexpected \"%s\" line in "
+			    "headers {@%d}", 
+			    String_CString(head->key), Parser_Position(par));
+		break;
+	    }
 	}
 	if (gCheck && ch >= '\0' && ch <= ' ') {
 	    if (++warnCount < kCheck_MaxWarnCount)
 		Parser_Warn(par, "Illegal character %s in message "
 			    "headers%s {@%d}", Char_QuotedCString(ch), 
-			    warnCount == kCheck_MaxWarnCount ? " (and more)":"",
+			    warnCount == kCheck_MaxWarnCount ?
+				" (and more)" : "",
 			    Parser_Position(par));
 	}
     }
-    Parse_StringEnd(par, head->key);
-    // Backup over the colon
-    head->key->len--;
-    String_TrimSpaces(head->key);
+    // Backup over the colon (unless it's ">From ")
+    if (ch == ':') {
+	Parse_StringEnd(par, head->key);
+	head->key->len--;
+	String_TrimSpaces(head->key);
+    }
 
     // Parse header value
     //
@@ -2125,7 +2138,8 @@ void Stream_WriteHeaders(Stream *output, Headers *headers)
 	    Stream_WriteString(output, head->line);
 	} else {
 	    Stream_WriteString(output, head->key);
-	    Stream_WriteChars(output, ": ", 2);
+	    if (!String_IsEqual(head->key, &Str_GTFromSpace, true))
+		Stream_WriteChars(output, ": ", 2);
 	    Stream_WriteString(output, head->value);
 	    Stream_WriteNewline(output);
 	}
@@ -3671,6 +3685,20 @@ void CheckMailbox(Mailbox *mbox, bool stringent, bool repair)
 	//
 	if (!stringent)
 	    continue;
+
+	// Got ">From " in headers?
+	//
+	value = Header_Get(msg->headers, &Str_GTFromSpace);
+	if (value != NULL) {
+	    Warn("Message %s: Bogus \">From \" line in the the headers:\n"
+		 " \">From %s\"%s",
+		 String_CString(msg->tag), String_CString(value),
+		 IsRepairingAll(&state) ? " (removing)" : "");
+
+	    if (ShouldRepair(&state)) {
+		Header_Delete(msg->headers, &Str_GTFromSpace, false);
+	    }
+	}
 
 	// Got From?
 	//

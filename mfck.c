@@ -1,7 +1,7 @@
 /*
 **  mfck -- A mailbox checking tool (and more!)
 **
-**  Copyright (c) 2008-2010 by Lennart Lovstrand <mfck@lenlolabs.com>
+**  Copyright (c) 2008-2017 by Lennart Lovstrand <mfck@lenlolabs.com>
 */
 
 #include <stdio.h>
@@ -37,6 +37,8 @@
 #  define realloc				GC_REALLOC
 #  define free					GC_FREE
 #endif
+
+#include "vers.h"
 
 #define OPT_FUZZY_NEWLINE
 #define OPT_LOCK_FILE
@@ -241,9 +243,8 @@ jmp_buf *gInterruptReentry = NULL;
 FILE *gOpenPipe = NULL;
 
 const char gVersion[] = "mfck version 1.0";
-const char gRevision[] = "$Rev$";
 const char gCopyright[] =
-    "Copyright (c) 2008-2010, Lennart Lovstrand <mfck@lenlolabs.com>";
+    "Copyright (c) 2008-2017, Lennart Lovstrand <mfck@lenlolabs.com>";
 
 /*
 **  Forward Declarations
@@ -5153,10 +5154,7 @@ void Usage(const char *pname, bool help)
 
 void ShowVersion(void)
 {
-    int rev = -1;
-
-    sscanf(gRevision, "$Rev: %d", &rev);
-    printf("%s (rev %d)\n%s\n", gVersion, rev, gCopyright);
+    printf("%s (rev %d)\n%s\n", gVersion, kRevision, gCopyright);
 }
 
 String *NextMainArg(int *pAC, int argc, char **argv)

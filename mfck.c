@@ -28,6 +28,8 @@
 #  include <readline/history.h>
 #endif
 
+#include "md5.h"
+
 #ifdef USE_GC
 #  ifdef DEBUG
 #    define GC_DEBUG
@@ -65,6 +67,8 @@
 #define kDefaultLockTimeout			5	// sec
 
 #define kString_ExcerptLength			50
+
+#define kFakeMessageIDSuffix			"@mfck"
 
 #define String_Define(NAM, CSTR)			\
     const String NAM = {CSTR, sizeof(CSTR)-1, kString_Const};
@@ -2153,6 +2157,45 @@ void Stream_WriteHeaders(Stream *output, Headers *headers)
     }
 }
 
+md5_byte_t *Headers_MD5(Headers *headers, md5_byte_t *md5digest)
+{
+    md5_state_t md5state;
+    Header *header;
+
+    if (md5digest == NULL)
+	md5digest = malloc(16);
+
+    md5_init(&md5state);
+
+    for (header = headers->root; header != NULL; header = header->next) {
+	md5_append(&md5state, (md5_byte_t *) String_Chars(header->line),
+		   String_Length(header->line));
+    }
+
+    md5_finish(&md5state, md5digest);
+
+    return md5digest;
+}
+
+String *Headers_FakeMessageID(Headers *headers)
+{
+    md5_byte_t md5digest[16];
+    String *result = String_Alloc(1 + sizeof(md5digest) * 2 +
+				  strlen(kFakeMessageIDSuffix) + 1);
+
+    Headers_MD5(headers, md5digest);
+
+    sprintf((char *) String_Chars(result),
+	    "<%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x"
+	    kFakeMessageIDSuffix ">",
+	    md5digest[ 0], md5digest[ 1], md5digest[ 2], md5digest[ 3],
+	    md5digest[ 4], md5digest[ 5], md5digest[ 6], md5digest[ 7],
+	    md5digest[ 8], md5digest[ 9], md5digest[10], md5digest[11],
+	    md5digest[12], md5digest[13], md5digest[14], md5digest[15]);
+
+    return result;
+}
+
 /**
  **  MIME Functions
  **/
@@ -3815,8 +3858,15 @@ void CheckMailbox(Mailbox *mbox, bool stringent, bool repair)
 	    value = Header_Get(msg->headers, source);
 
 	    if (value == NULL) {
-		Warn("Message %s: Missing Message-ID: header",
-		     String_CString(msg->tag));
+		String *fakeID = Headers_FakeMessageID(msg->headers);
+
+		Warn("Message %s: Missing Message-ID: header, %s replace " \
+		     "with %s", String_CString(msg->tag),
+		     IsRepairingAll(&state) ? "will" : "could", fakeID);
+
+		if (ShouldRepair(&state)) {
+		    Header_Set(msg->headers, &Str_MessageID, fakeID);
+		}
 	    }
 	}
 

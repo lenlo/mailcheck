@@ -17,7 +17,8 @@ LOADLIBES=	-lreadline # -lgc
 TARGET=		mfck
 DESTBIN=	/usr/local/bin
 
-$(TARGET):
+$(TARGET):	mfck.o md5.o
+	$(CC) -o $(TARGET) mfck.o md5.o $(LOADLIBES)
 
 mfck.c:		vers.h
 

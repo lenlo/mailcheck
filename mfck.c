@@ -3853,11 +3853,11 @@ void CheckMailbox(Mailbox *mbox, bool stringent, bool repair)
 	// Got Message-ID?
 	//
 	value = Header_Get(msg->headers, &Str_MessageID);
-	if (value == NULL) {
+	if (value == NULL || String_Length(value) == 0) {
 	    source = &Str_XMessageID;
 	    value = Header_Get(msg->headers, source);
 
-	    if (value == NULL) {
+	    if (value == NULL || String_Length(value) == 0) {
 		String *fakeID = Headers_FakeMessageID(msg->headers);
 
 		Warn("Message %s: Missing Message-ID: header, %s replace " \

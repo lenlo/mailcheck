@@ -2424,8 +2424,7 @@ int ProcessDovecotFromSpaceBugBody(Parser *par, int endPos,
 				   Array *bodyParts)
 {
     int xHeadSpace = 0;
-    String *part;
-
+    String *part = NULL;
 
     if (bodyParts != NULL)
 	Parse_StringStart(par, &part);

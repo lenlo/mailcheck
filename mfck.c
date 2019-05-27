@@ -3749,9 +3749,9 @@ void CheckMailbox(Mailbox *mbox, bool strict, bool repair)
 	    if (value == NULL || String_Length(value) == 0) {
 		String *synthID = Message_SynthesizeMessageID(msg);
 
-		Warn("Message %s: Missing Message-ID: header, %s replace " \
-		     "with %s", String_CString(msg->tag),
-		     IsRepairingAll(&state) ? "will" : "could",
+		Warn("Message %s: Missing Message-ID: header, %s with %s",
+		     String_CString(msg->tag),
+		     IsRepairingAll(&state) ? "replacing" : "could replace",
 		     String_CString(synthID));
 
 		if (ShouldRepair(&state)) {

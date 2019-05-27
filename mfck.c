@@ -4352,6 +4352,27 @@ void ListMailbox(Stream *output, Mailbox *mbox, int num, int count)
     }
 }
 
+void FindMessages(Stream *output, Mailbox *mbox, const String *pattern)
+{
+    Message *msg;
+    int numWidth = IntLength(mbox->count);
+
+    for (msg = Mailbox_Root(mbox); msg != NULL; msg = msg->next) {
+	bool found = false;
+	Header *head;
+
+	for (head = msg->headers->root; head != NULL; head = head->next) {
+	    if (String_FindString(head->value, pattern, false) >= 0) {
+		found = true;
+		break;
+	    }
+	}
+
+	if (found)
+	    ListMessage(output, msg->num, numWidth, msg, 0, -1);
+    }
+}
+
 int CompareMessageIDs(const void *a, const void *b)
 {
     Message *ma = *(Message **) a;
@@ -4516,6 +4537,7 @@ typedef enum {
     kCmd_DeleteAndShowNext,
     kCmd_Edit,
     kCmd_Exit,
+    kCmd_Find,
     kCmd_Help,
     kCmd_Join,
     kCmd_List,
@@ -4568,6 +4590,8 @@ CommandTable kCommandTable[] = {
      "edit the specified message using a file-based editor"},
     {"exit",	NULL,		kCmd_WriteAndExit,
      "save any changes, then leave the mailbox"},
+    {"find",	"<string>",	kCmd_Find,
+     "find any messages containing the given string"},
     {"headers",	"[<msg>]",	kCmd_List,
      "list a page full of message descriptions"},
     {"list",	"[<msg>]",	kCmd_List,
@@ -4983,6 +5007,11 @@ void RunLoop(Mailbox *mbox, Array *commands)
 		break;
 	    cur = iMax(cur - (gPageHeight - 1), 1);
 	    ListMailbox(gStdOut, mbox, cur, gPageHeight - 1);
+	    break;
+
+	  case kCmd_Find:
+	    arg = NextArg(&argi, args, true);
+	    FindMessages(gStdOut, mbox, arg);
 	    break;
 
 	  case kCmd_Strict:

@@ -1,7 +1,7 @@
 /*
 **  mfck -- A mailbox checking tool (and more!)
 **
-**  Copyright (c) 2008-2017 by Lennart Lovstrand <mfck@lenlolabs.com>
+**  Copyright (c) 2008-2019 by Lennart Lovstrand <mfck@lenlolabs.com>
 */
 
 #include <stdio.h>
@@ -68,7 +68,7 @@
 
 #define kString_ExcerptLength			50
 
-#define kFakeMessageIDSuffix			"@mfck"
+#define kSyntheticMessageIDSuffix		"@synthesized-by-mfck"
 
 #define String_Define(NAM, CSTR)			\
     const String NAM = {CSTR, sizeof(CSTR)-1, kString_Const};
@@ -160,7 +160,7 @@ typedef struct {
 */
 
 // General Strings
-String_Define(Str_Emtpy, "");
+String_Define(Str_Empty, "");
 String_Define(Str_Newline, "\n");
 String_Define(Str_Space, " ");
 String_Define(Str_TwoDashes, "--");
@@ -213,7 +213,7 @@ String_Define(Str_Plus, "+");
 String_Define(Str_Minus, "-");
 
 String_Define(Str_True, "true");
-String_Define(Str_Stringent, "stringent");
+String_Define(Str_Strict, "strict");
 
 String_Define(Str_DotLock, ".lock");
 
@@ -231,7 +231,7 @@ bool gDryRun = false;
 bool gInteractive = false;
 bool gMap = true;
 bool gShowContext = false;
-bool gStringent = false;
+bool gStrict = false;
 bool gQuiet = false;
 bool gUnique = false;
 bool gVerbose = false;
@@ -485,7 +485,7 @@ static inline const char *String_End(const String *str)
 
 static inline const String *String_Safe(String *str)
 {
-    return str != NULL ? str : &Str_Emtpy;
+    return str != NULL ? str : &Str_Empty;
 }
 
 static inline void String_SetChars(String *str, const char *buf)
@@ -2157,37 +2157,45 @@ void Stream_WriteHeaders(Stream *output, Headers *headers)
     }
 }
 
-md5_byte_t *Headers_MD5(Headers *headers, md5_byte_t *md5digest)
+String *Message_SynthesizeMessageID(Message *msg)
 {
+    const String *idHeaderKeys[] = {
+	&Str_Cc, &Str_Date, &Str_From, &Str_Sender, &Str_Subject, &Str_To, NULL
+    };
     md5_state_t md5state;
+    md5_byte_t md5digest[16];
+    String *result = String_Alloc(1 + sizeof(md5digest) * 2 +
+				  strlen(kSyntheticMessageIDSuffix) + 1);
     Header *header;
-
-    if (md5digest == NULL)
-	md5digest = malloc(16);
 
     md5_init(&md5state);
 
-    for (header = headers->root; header != NULL; header = header->next) {
-	md5_append(&md5state, (md5_byte_t *) String_Chars(header->line),
-		   String_Length(header->line));
+    /* Compute the message ID based on the MD5 checksum for a set of
+     * identifying headers + the message body.
+     */
+
+    for (header = msg->headers->root; header != NULL; header = header->next) {
+	const String **pkey;
+
+	for (pkey = idHeaderKeys; *pkey != NULL; pkey++) {
+	    if (String_IsEqual(header->key, *pkey, true)) {
+		// XXX: Should decode the header value before using it
+		md5_append(&md5state,
+			   (md5_byte_t *) String_Chars(header->value),
+			   String_Length(header->line));
+		break;
+	    }
+	}
     }
+
+    md5_append(&md5state, (md5_byte_t *) String_Chars(msg->body),
+	       String_Length(msg->body));
 
     md5_finish(&md5state, md5digest);
 
-    return md5digest;
-}
-
-String *Headers_FakeMessageID(Headers *headers)
-{
-    md5_byte_t md5digest[16];
-    String *result = String_Alloc(1 + sizeof(md5digest) * 2 +
-				  strlen(kFakeMessageIDSuffix) + 1);
-
-    Headers_MD5(headers, md5digest);
-
     sprintf((char *) String_Chars(result),
 	    "<%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x"
-	    kFakeMessageIDSuffix ">",
+	    kSyntheticMessageIDSuffix ">",
 	    md5digest[ 0], md5digest[ 1], md5digest[ 2], md5digest[ 3],
 	    md5digest[ 4], md5digest[ 5], md5digest[ 6], md5digest[ 7],
 	    md5digest[ 8], md5digest[ 9], md5digest[10], md5digest[11],
@@ -2405,7 +2413,7 @@ void WarnContentLength(Message *msg, int contLen, int bodyLen)
 	Warn("Message %s: Oversized, %d bytes too many",
 	     String_CString(msg->tag), bodyLen - contLen);
 
-    } else if (gStringent) {
+    } else if (gStrict) {
 	Warn("Message %s: Incorrect Content-Length: %d; using %d",
 	     String_CString(msg->tag), contLen, bodyLen);
     }
@@ -3675,7 +3683,7 @@ bool ShouldRepair(RepairState *state)
     return choice == 'y';
 }
 
-void CheckMailbox(Mailbox *mbox, bool stringent, bool repair)
+void CheckMailbox(Mailbox *mbox, bool strict, bool repair)
 {
     Message *msg;
     RepairState state;
@@ -3696,8 +3704,8 @@ void CheckMailbox(Mailbox *mbox, bool stringent, bool repair)
 	int bodyLength = Message_BodyLength(msg);
 
 	// Always care about incorrect Content-Lengths, but only
-	// care about missing ones if we're being stringent.
-	if (cllen != bodyLength && (value != NULL || stringent)) {
+	// care about missing ones if we're being strict.
+	if (cllen != bodyLength && (value != NULL || strict)) {
 	    // Got the Dovecot "From " bug?
 	    //
 	    if (msg->dovecotFromSpaceBug != kDFSB_None) {
@@ -3730,12 +3738,34 @@ void CheckMailbox(Mailbox *mbox, bool stringent, bool repair)
 			   String_PrintF("%d", bodyLength));
 	    }
 	}
+
+	// Got Message-ID?
+	//
+	value = Header_Get(msg->headers, &Str_MessageID);
+	if (value == NULL || String_Length(value) == 0) {
+	    source = &Str_XMessageID;
+	    value = Header_Get(msg->headers, source);
+
+	    if (value == NULL || String_Length(value) == 0) {
+		String *synthID = Message_SynthesizeMessageID(msg);
+
+		Warn("Message %s: Missing Message-ID: header, %s replace " \
+		     "with %s", String_CString(msg->tag),
+		     IsRepairingAll(&state) ? "will" : "could",
+		     String_CString(synthID));
+
+		if (ShouldRepair(&state)) {
+		    Header_Set(msg->headers, &Str_MessageID, synthID);
+		}
+	    }
+	}
+
 	if (state.quit)
 	    break;
 
-	// Only stringent tests below
+	// Only strict tests below
 	//
-	if (!stringent)
+	if (!strict)
 	    continue;
 
 	// Got ">From " in headers?
@@ -3849,27 +3879,6 @@ void CheckMailbox(Mailbox *mbox, bool stringent, bool repair)
 	}
 	if (state.quit)
 	    break;
-
-	// Got Message-ID?
-	//
-	value = Header_Get(msg->headers, &Str_MessageID);
-	if (value == NULL || String_Length(value) == 0) {
-	    source = &Str_XMessageID;
-	    value = Header_Get(msg->headers, source);
-
-	    if (value == NULL || String_Length(value) == 0) {
-		String *fakeID = Headers_FakeMessageID(msg->headers);
-
-		Warn("Message %s: Missing Message-ID: header, %s replace " \
-		     "with %s", String_CString(msg->tag),
-		     IsRepairingAll(&state) ? "will" : "could",
-		     String_CString(fakeID));
-
-		if (ShouldRepair(&state)) {
-		    Header_Set(msg->headers, &Str_MessageID, fakeID);
-		}
-	    }
-	}
 
 	// Make sure there's no (undeclared) binary data in headers or body
 	//
@@ -3985,7 +3994,7 @@ bool Message_Split(Message *msg, bool interactively)
 }
 
 #if 0
-void CheckContentLengths(Message *msg, bool stringent, bool repair)
+void CheckContentLengths(Message *msg, bool strict, bool repair)
 {
     for (; msg != NULL; msg = msg->next) {
 	String *value = Header_Get(msg->headers, &Str_ContentLength);
@@ -4008,7 +4017,7 @@ void CheckContentLengths(Message *msg, bool stringent, bool repair)
 			   String_PrintF("%d", bodlen));
 
 	    } else {
-		if (stringent)
+		if (strict)
 		    Warn("Message %s: Missing Content-Length: header",
 			 String_CString(msg->tag));
 	    }
@@ -4518,7 +4527,7 @@ typedef enum {
     kCmd_ShowPrevious,
     kCmd_ShowNext,
     kCmd_Split,
-    kCmd_Stringent,
+    kCmd_Strict,
     kCmd_Undelete,
     kCmd_Unique,
     kCmd_Write,
@@ -4549,7 +4558,7 @@ CommandTable kCommandTable[] = {
      "go to the next message and display it"},
     {"-",	NULL,		kCmd_ShowPrevious,
      "go to the previous message and display it"},
-    {"check",	"[stringent]",	kCmd_Check,
+    {"check",	"[strict]",	kCmd_Check,
      "check the mailbox' internal consistency"},
     {"delete",	"[<msgs>]",	kCmd_Delete,
      "mark one or more messages as deleted"},
@@ -4577,14 +4586,14 @@ CommandTable kCommandTable[] = {
      "display the contents of the given message(s)"},
     {"quit",	NULL,		kCmd_Exit,
      "leave the mailbox without saving any changes"},
-    {"repair",	"[stringent]",	kCmd_Repair,
+    {"repair",	"[strict]",	kCmd_Repair,
      "check the mailbox' internal state and repair if needed"},
     {"save",	"[<msgs>] <file>", kCmd_Save,
      "save the messages to the given file"},
     {"split",	"[<msgs>]",	kCmd_Split,
      "look for 'From ' lines in the messages and split them"},
-    {"stringent", "[<on/off>]", kCmd_Stringent,
-     "set/show 'stringent' mode when checking mailboxes"},
+    {"strict", "[<on/off>]", kCmd_Strict,
+     "set/show 'strict' mode when checking mailboxes"},
     {"undelete", "[<msgs>]",	kCmd_Undelete,
      "undelete one or more messages"},
     {"unique",	NULL,		kCmd_Unique,
@@ -4976,31 +4985,31 @@ void RunLoop(Mailbox *mbox, Array *commands)
 	    ListMailbox(gStdOut, mbox, cur, gPageHeight - 1);
 	    break;
 
-	  case kCmd_Stringent:
+	  case kCmd_Strict:
 	    arg = NextArg(&argi, args, false);
 	    if (!NoNextArg(&argi, args))
 		break;
-	    gStringent = TrueString(arg, !gStringent);
-	    Note("Stringent checking mode is turned %s",
-		 gStringent ? "on" : "off");
+	    gStrict = TrueString(arg, !gStrict);
+	    Note("Strict checking mode is turned %s",
+		 gStrict ? "on" : "off");
 	    break;
 
 	  case kCmd_Check:
 	    arg = NextArg(&argi, args, false);
 	    if (!NoNextArg(&argi, args))
 		break;
-	    if (arg != NULL && String_HasPrefix(&Str_Stringent, arg, false))
+	    if (arg != NULL && String_HasPrefix(&Str_Strict, arg, false))
 		arg = &Str_True;
-	    CheckMailbox(mbox, TrueString(arg, gStringent), false);
+	    CheckMailbox(mbox, TrueString(arg, gStrict), false);
 	    break;
 
 	  case kCmd_Repair:
 	    arg = NextArg(&argi, args, false);
 	    if (!NoNextArg(&argi, args))
 		break;
-	    if (arg != NULL && String_HasPrefix(&Str_Stringent, arg, false))
+	    if (arg != NULL && String_HasPrefix(&Str_Strict, arg, false))
 		arg = &Str_True;
-	    CheckMailbox(mbox, TrueString(arg, gStringent), true);
+	    CheckMailbox(mbox, TrueString(arg, gStrict), true);
 	    break;
 
 	  case kCmd_Unique:
@@ -5200,7 +5209,7 @@ void Usage(const char *pname, bool help)
 		"  -o <file> \tconcatenate messages into <file>\n"
 		"  -q \t\tbe quiet and don't report warnings or notices\n"
 		"  -r \t\trepair the given mailboxes\n"
-		"  -s \t\tbe stringent and report more indiscretions than otherwise\n"
+		"  -s \t\tbe strict and report more indiscretions than otherwise\n"
 		"  -u \t\tunique messages in each mailbox by removing duplicates\n"
 		"  -v \t\tbe verbose and print out more progress information\n"
 		"  -C \t\tshow a few lines of context around parse errors\n"
@@ -5371,7 +5380,7 @@ int main(int argc, char **argv)
 		  case 'o': outFile = NextMainArg(&ac, argc, argv); break;
 		  case 'q': gQuiet = true; break;
 		  case 'r': Array_Append(commands, &Str_Repair); break;
-		  case 's': gStringent = true; break;
+		  case 's': gStrict = true; break;
 		  case 'u': Array_Append(commands, &Str_Unique); break;
 		  case 'v': gVerbose = true; break;
 		  case 'w': gAutoWrite= true; break;

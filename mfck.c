@@ -22,6 +22,7 @@
 #include <sys/types.h>
 #include <dirent.h>
 #include <limits.h>
+#include <sys/ioctl.h>
 
 #ifdef USE_READLINE
 #  include <readline/readline.h>
@@ -203,6 +204,7 @@ String_Define(Str_Boundary, "boundary");
 // Other Strings
 String_Define(Str_All, "all");
 String_Define(Str_Check, "check");
+String_Define(Str_List, "list");
 String_Define(Str_Repair, "repair");
 String_Define(Str_Unique, "unique");
 
@@ -242,7 +244,7 @@ int gMessageCounter = 0;
 String *gPager = NULL;
 Stream *gStdOut;
 int gPageWidth = kDefaultPageWidth;
-int gPageHeight = kDefaultPageHeight;
+int gPageHeight = -1;
 
 jmp_buf *gInterruptReentry = NULL;
 FILE *gOpenPipe = NULL;
@@ -4306,16 +4308,21 @@ int IntLength(int num)
 void ListMessage(Stream *output, int num, int numWidth, Message *msg,
 		 int previewLines, int cur)
 {
+    // ' '<num:numWidth>': '<date:12>'  '<from>'  '<subject>'  '<size:6>
     String *sizstr = String_ByteSize(String_Length(msg->data));
+    int fromSubjectWidth = gPageWidth - 27 - numWidth;
+    int fromWidth = fromSubjectWidth * 2 / 5;
+    int subjectWidth = fromSubjectWidth - fromWidth;
 
     Stream_PrintF(output, "%c%*d%c ",
 		  num == cur ? '>' : ' ', numWidth, num,
 		  Message_IsDeleted(msg) ? 'D' : ':');
     PrintShortDate(output, Header_Get(msg->headers, &Str_Date));
-    Stream_PrintF(output, "  %-20.20s",
+    Stream_PrintF(output, "  %-*.*s", fromWidth, fromWidth,
 		  String_CString(String_Safe(Header_Get(msg->headers, &Str_From))));
     Stream_PrintF(output, "  %-*.*s",
-		  33 - numWidth, 33 - numWidth,
+		  //33 - numWidth, 33 - numWidth,
+		  subjectWidth, subjectWidth,
 		  String_CString(String_Safe(Header_Get(msg->headers, &Str_Subject))));
     Stream_PrintF(output, " %6s\n", String_CString(String_Safe(sizstr)));
 
@@ -4338,6 +4345,10 @@ void ListMessage(Stream *output, int num, int numWidth, Message *msg,
 
 void ListMailbox(Stream *output, Mailbox *mbox, int num, int count)
 {
+    // A negative count means all messages
+    if (count < 0)
+	count = Mailbox_Count(mbox) - num;
+
     // Adjust to even page boundary with zero offset
     //int start = ((num - 1) / count) * count;
     int start = num;
@@ -5404,7 +5415,7 @@ int main(int argc, char **argv)
 		    break;
 		  case 'h': Usage(argv[0], true); break;
 		  case 'i': gInteractive = true; break;
-		    //case 'l': gWantContentLength = true; break;
+		  case 'l': Array_Append(commands, &Str_List); break;
 		  case 'n': gDryRun = true; break;
 		  case 'o': outFile = NextMainArg(&ac, argc, argv); break;
 		  case 'q': gQuiet = true; break;
@@ -5414,6 +5425,7 @@ int main(int argc, char **argv)
 		  case 'v': gVerbose = true; break;
 		  case 'w': gAutoWrite= true; break;
 		  case 'C': gShowContext = true; break;
+		    //case 'L': gWantContentLength = true; break;
 		  case 'N': gMap = false; break;
 		  case 'V': ShowVersion(); Exit(0); break;
 		  default:
@@ -5421,6 +5433,16 @@ int main(int argc, char **argv)
 		}
 	    }
 	}
+    }
+
+    struct winsize ws;
+
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0) {
+	gPageWidth = ws.ws_col;
+	if (gInteractive)
+	    gPageHeight = ws.ws_row;
+    } else if (gInteractive) {
+	gPageHeight = kDefaultPageHeight;
     }
 
     if (outFile != NULL && !gDryRun) {

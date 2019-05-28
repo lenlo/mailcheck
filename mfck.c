@@ -79,6 +79,8 @@ typedef enum {false = 0, true = !false} bool;
 typedef enum {kString_Shared = 0, kString_Alloced, kString_Mapped,
 	      kString_Const} StringType;
 
+#define kString_NotFound			-1
+
 typedef void Free(void *);
 
 typedef struct {
@@ -193,6 +195,8 @@ String_Define(Str_XKeywords, "X-Keywords");
 String_Define(Str_XMessageID, "X-Message-ID");
 String_Define(Str_XUID, "X-UID");
 
+String_Define(Str_Body, "Body");
+
 // Content-Transfer-Encodings
 String_Define(Str_Binary, "binary");
 String_Define(Str_8Bit, "8bit");
@@ -213,6 +217,7 @@ String_Define(Str_EnvelopeSender, "envelope sender");
 
 String_Define(Str_Plus, "+");
 String_Define(Str_Minus, "-");
+String_Define(Str_Colon, ":");
 
 String_Define(Str_True, "true");
 String_Define(Str_Strict, "strict");
@@ -244,7 +249,7 @@ int gMessageCounter = 0;
 String *gPager = NULL;
 Stream *gStdOut;
 int gPageWidth = kDefaultPageWidth;
-int gPageHeight = -1;
+int gPageHeight = kDefaultPageHeight;
 
 jmp_buf *gInterruptReentry = NULL;
 FILE *gOpenPipe = NULL;
@@ -640,13 +645,31 @@ static inline bool String_IsEqual(const String *a, const String *b,
 static inline bool String_HasPrefix(const String *str, const String *sub,
 				    bool sameCase)
 {
-    if (String_Length(str) < String_Length(sub))
+    int strlen = String_Length(str);
+    int sublen = String_Length(sub);
+
+    if (strlen < sublen)
 	return false;
 
-    return sameCase ?
-	strncmp(String_Chars(str), String_Chars(sub), String_Length(sub)) == 0 :
-	strncasecmp(String_Chars(str), String_Chars(sub),
-		    String_Length(sub)) == 0;
+    return (sameCase ?
+	    strncmp(String_Chars(str), String_Chars(sub), sublen) :
+	    strncasecmp(String_Chars(str), String_Chars(sub), sublen)) == 0;
+}
+
+static inline bool String_HasSuffix(const String *str, const String *sub,
+				    bool sameCase)
+{
+    int strlen = String_Length(str);
+    int sublen = String_Length(sub);
+
+    if (strlen < sublen)
+	return false;
+
+    return (sameCase ?
+	    strncmp(String_Chars(str) + strlen - sublen, String_Chars(sub),
+		    sublen) :
+	    strncasecmp(String_Chars(str) + strlen - sublen, String_Chars(sub),
+			sublen)) == 0;
 }
 
 static inline int String_Compare(const String *a, const String *b,
@@ -689,7 +712,7 @@ int _String_FindTwoChars(const String *str, char ach, char bch)
 	p++;
     }
 
-    return -1;
+    return kString_NotFound;
 }
 
 int _String_FindLastTwoChars(const String *str, char ach, char bch)
@@ -703,7 +726,7 @@ int _String_FindLastTwoChars(const String *str, char ach, char bch)
 	    return p - begin;
     }
 
-    return -1;
+    return kString_NotFound;
 }
 
 int String_FindChar(const String *str, char ch, bool sameCase)
@@ -719,7 +742,7 @@ int String_FindChar(const String *str, char ch, bool sameCase)
     const char *p = memchr(String_Chars(str), ch, String_Length(str));
 
     if (p == NULL)
-	return -1;
+	return kString_NotFound;
 
     return p - String_Chars(str);
 }
@@ -745,7 +768,7 @@ int String_FindLastChar(const String *str, char ch, bool sameCase)
 	    return p - begin;
     }
 
-    return -1;
+    return kString_NotFound;
 }
 
 int String_FindString(const String *str, const String *sub, bool sameCase)
@@ -760,7 +783,8 @@ int String_FindString(const String *str, const String *sub, bool sameCase)
     int offset = 0;
     int pos;
 
-    while ((pos = String_FindChar(&tmp, firstChar, sameCase)) != -1) {
+    while ((pos = String_FindChar(&tmp, firstChar, sameCase)) !=
+	   kString_NotFound) {
 	String_Adjust(&tmp, pos);
 	offset += pos;
 
@@ -772,7 +796,12 @@ int String_FindString(const String *str, const String *sub, bool sameCase)
 	String_Adjust(&tmp, 1);
     }
 
-    return -1;
+    return kString_NotFound;
+}
+
+bool String_FoundString(const String *str, const String *sub, bool sameCase)
+{
+    return String_FindString(str, sub, sameCase) != kString_NotFound;
 }
 
 static inline int String_FindNewline(const String *str)
@@ -1250,7 +1279,7 @@ bool Parse_UntilNewline(Parser *par, String **pResult)
 {
     int pos = String_FindNewline(&par->rest);
 
-    if (pos == -1) {
+    if (pos == kString_NotFound) {
 	if (pResult != NULL)
 	    *pResult = NULL;
 	return false;
@@ -1268,7 +1297,7 @@ bool Parse_UntilChar(Parser *par, char ch, bool sameCase, String **pResult)
 {
     int pos = String_FindChar(&par->rest, ch, sameCase);
 
-    if (pos == -1) {
+    if (pos == kString_NotFound) {
 	if (pResult != NULL)
 	    *pResult = NULL;
 	return false;
@@ -1294,7 +1323,7 @@ bool Parse_UntilString(Parser *par, const String *expect, bool sameCase,
 {
     int pos = String_FindString(&par->rest, expect, sameCase);
 
-    if (pos == -1) {
+    if (pos == kString_NotFound) {
 	if (pResult != NULL)
 	    *pResult = NULL;
 	return false;
@@ -1593,28 +1622,28 @@ void Stream_PrintF(Stream *output, const char *fmt, ...)
  **  String <-> Array Functions
  **/
 
-String *Array_Join(Array *array, const String *delim)
+String *Array_JoinTail(Array *array, const String *delim, int index)
 {
     int i, count = Array_Count(array);
-    int newLength = 0;
+    int delimLen = String_Length(delim);
+    int newLength = (count - index - 1) * delimLen;
 
-    if (count == 0)
+    if (count <= index)
 	return NULL;
 
-    for (i = 0; i < count; i++) {
+    for (i = index; i < count; i++) {
 	String *str = Array_GetAt(array, i);
 	newLength += String_Length(str);
     }
 
-    int delimLen = String_Length(delim);
-    String *newString = String_Alloc(newLength + count * delimLen);
+    String *newString = String_Alloc(newLength);
     char *newChars = (char *) String_Chars(newString);
 
-    for (i = 0; i < count; i++) {
+    for (i = index; i < count; i++) {
 	String *str = Array_GetAt(array, i);
 	int len = String_Length(str);
 
-	if (i > 0 && delimLen > 0) {
+	if (i > index && delimLen > 0) {
 	    memcpy(newChars, String_Chars(delim), delimLen);
 	    newChars += delimLen;
 	}
@@ -1623,6 +1652,11 @@ String *Array_Join(Array *array, const String *delim)
     }
 
     return newString;
+}
+
+String *Array_Join(Array *array, const String *delim)
+{
+    return Array_JoinTail(array, delim, 0);
 }
 
 Array *String_Split(const String *str, char separator, bool trim)
@@ -1696,7 +1730,7 @@ const String *kMonths[] = {
     NULL
 };
 
-// Returns NULL if none was found
+// Returns -1 if none was found
 //
 static int ParseKeyword(Parser *par, const String **keywords)
 {
@@ -2969,7 +3003,7 @@ String *Mailbox_Name(Mailbox *mbox)
     if (mbox->name == NULL && mbox->source != NULL) {
 	int pos = String_FindLastChar(mbox->source, '/', true);
 
-	if (pos++ == -1)
+	if (pos++ == kString_NotFound)
 	    pos = 0;
 
 	mbox->name =
@@ -3644,7 +3678,7 @@ static int FindIllegalChar(String *str, bool controlOK, bool eightBitOK)
 	    return i;
     }
 
-    return -1;
+    return kString_NotFound;
 }
 
 typedef struct {
@@ -3844,7 +3878,7 @@ void CheckMailbox(Mailbox *mbox, bool strict, bool repair)
 		String *received = Header_GetLastValue(msg->headers, source);
 		if (received != NULL) {
 		    int pos = String_FindChar(received, ';', true);
-		    if (pos != -1) {
+		    if (pos != kString_NotFound) {
 			Parser tmp;
 			Parser_Set(&tmp, received);
 			Parser_Move(&tmp, pos + 1);
@@ -4343,44 +4377,64 @@ void ListMessage(Stream *output, int num, int numWidth, Message *msg,
     }
 }
 
-void ListMailbox(Stream *output, Mailbox *mbox, int num, int count)
+void ListMailbox(Stream *output, Mailbox *mbox, int cur, int count)
 {
     // A negative count means all messages
     if (count < 0)
-	count = Mailbox_Count(mbox) - num;
+	count = Mailbox_Count(mbox) - cur - 1;
 
     // Adjust to even page boundary with zero offset
-    //int start = ((num - 1) / count) * count;
-    int start = num;
-    int i = 0;
+    //int start = ((cur - 1) / count) * count;
+    int start = cur;
+    int i = 1;
     int digits = IntLength(start + count + 1 - 1);
     Message *msg;
 
     for (msg = Mailbox_Root(mbox); msg != NULL && i < start; msg = msg->next, i++);
 
     for (; msg != NULL && i < start + count; msg = msg->next, i++) {
-	ListMessage(output, i + 1, digits, msg, 0, num);
+	ListMessage(output, i, digits, msg, 0, cur);
     }
 }
 
-void FindMessages(Stream *output, Mailbox *mbox, const String *pattern)
+#define kSearchBody		((String *) -1)
+
+// Key can be NULL which will make us try to find the string everywhere
+void FindMessages(Stream *output, Mailbox *mbox, const String *key,
+		  const String *string)
 {
     Message *msg;
     int numWidth = IntLength(mbox->count);
+
+    printf("# FindMessages: '%s' '%s'\n", String_CString(key), String_CString(string));
+
+    if (String_IsEqual(key, &Str_Body, false))
+	key = kSearchBody;
 
     for (msg = Mailbox_Root(mbox); msg != NULL; msg = msg->next) {
 	bool found = false;
 	Header *head;
 
-	for (head = msg->headers->root; head != NULL; head = head->next) {
-	    if (String_FindString(head->value, pattern, false) >= 0) {
-		found = true;
-		break;
+	if (key == NULL) {
+	    for (head = msg->headers->root; head != NULL; head = head->next) {
+		if (String_FoundString(head->value, string, false)) {
+		    found = true;
+		    break;
+		}
 	    }
+	} else if (key != kSearchBody) {
+	    const String *value = Header_Get(msg->headers, key);
+	    if (value != NULL)
+		found = String_FoundString(value, string, false);
 	}
 
-	if (found)
+	if (!found && (key == NULL || key == kSearchBody)) {
+	    found = String_FoundString(msg->body, string, false);
+	}
+
+	if (found) {
 	    ListMessage(output, msg->num, numWidth, msg, 0, -1);
+	}
     }
 }
 
@@ -4601,7 +4655,7 @@ CommandTable kCommandTable[] = {
      "edit the specified message using a file-based editor"},
     {"exit",	NULL,		kCmd_WriteAndExit,
      "save any changes, then leave the mailbox"},
-    {"find",	"<string>",	kCmd_Find,
+    {"find",	"[<header>:] <string>",	kCmd_Find,
      "find any messages containing the given string"},
     {"headers",	"[<msg>]",	kCmd_List,
      "list a page full of message descriptions"},
@@ -4858,7 +4912,7 @@ void RunLoop(Mailbox *mbox, Array *commands)
     int msgCount;
     int cmdCount = Array_Count(commands);
     const String *cmdLine;
-    int cur = 0;
+    int cur = 1;
     int ci = 0;
     bool done = false;
     bool success;
@@ -4889,6 +4943,7 @@ void RunLoop(Mailbox *mbox, Array *commands)
 	//
 	int argi = 0;
 	const String *arg;
+	String *str;
 	CommandTable *ct;
 	Command cmd = kCmd_None;
 	MessageSet *set = NULL;
@@ -5021,8 +5076,18 @@ void RunLoop(Mailbox *mbox, Array *commands)
 	    break;
 
 	  case kCmd_Find:
+	    // Args are [<header>':'] <string>...
 	    arg = NextArg(&argi, args, true);
-	    FindMessages(gStdOut, mbox, arg);
+	    if (String_HasSuffix(arg, &Str_Colon, true)) {
+		arg = String_Sub(arg, 0, String_Length(arg) - 1);
+	    } else {
+		arg = NULL;
+		argi--;
+	    }
+	    str = Array_JoinTail(args, &Str_Space, argi);
+	    FindMessages(gStdOut, mbox, arg, str);
+	    String_Free((String *) arg);
+	    String_Free(str);
 	    break;
 
 	  case kCmd_Strict:
@@ -5435,15 +5500,20 @@ int main(int argc, char **argv)
 	}
     }
 
+    /* Figure out the terminal window size
+     */
     struct winsize ws;
 
-    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0) {
-	gPageWidth = ws.ws_col;
-	if (gInteractive)
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) != -1) {
+	if (ws.ws_col > 0)
+	    gPageWidth = ws.ws_col;
+	if (ws.ws_row > 0)
 	    gPageHeight = ws.ws_row;
-    } else if (gInteractive) {
-	gPageHeight = kDefaultPageHeight;
     }
+
+    // There's o height limit if we're not interactive
+    if (!gInteractive)
+	gPageHeight = -1;
 
     if (outFile != NULL && !gDryRun) {
 	output = Stream_Open(outFile, true, true);

@@ -631,6 +631,11 @@ static inline void String_Adjust(String *str, int offset)
     str->len -= offset;
 }
 
+static inline bool String_IsEmpty(const String *str)
+{
+    return String_Length(str) == 0;
+}
+
 static inline bool String_IsEqual(const String *a, const String *b,
 				  bool sameCase)
 {
@@ -645,31 +650,31 @@ static inline bool String_IsEqual(const String *a, const String *b,
 static inline bool String_HasPrefix(const String *str, const String *sub,
 				    bool sameCase)
 {
-    int strlen = String_Length(str);
-    int sublen = String_Length(sub);
+    int stlen = String_Length(str);
+    int sulen = String_Length(sub);
 
-    if (strlen < sublen)
+    if (stlen < sulen)
 	return false;
 
     return (sameCase ?
-	    strncmp(String_Chars(str), String_Chars(sub), sublen) :
-	    strncasecmp(String_Chars(str), String_Chars(sub), sublen)) == 0;
+	    strncmp(String_Chars(str), String_Chars(sub), sulen) :
+	    strncasecmp(String_Chars(str), String_Chars(sub), sulen)) == 0;
 }
 
 static inline bool String_HasSuffix(const String *str, const String *sub,
 				    bool sameCase)
 {
-    int strlen = String_Length(str);
-    int sublen = String_Length(sub);
+    int stlen = String_Length(str);
+    int sulen = String_Length(sub);
 
-    if (strlen < sublen)
+    if (stlen < sulen)
 	return false;
 
     return (sameCase ?
-	    strncmp(String_Chars(str) + strlen - sublen, String_Chars(sub),
-		    sublen) :
-	    strncasecmp(String_Chars(str) + strlen - sublen, String_Chars(sub),
-			sublen)) == 0;
+	    strncmp(String_Chars(str) + stlen - sulen, String_Chars(sub),
+		    sulen) :
+	    strncasecmp(String_Chars(str) + stlen - sulen, String_Chars(sub),
+			sulen)) == 0;
 }
 
 static inline int String_Compare(const String *a, const String *b,
@@ -2383,10 +2388,6 @@ static bool ParseFromSpaceHelper(Parser *par, String **pEnvSender,
     if (!Parse_ConstString(par, &Str_FromSpace, true, NULL))
 	return false;
 
-    // There shouldn't be more than one space, but just in case...
-    //
-    (void) Parse_Spaces(par, NULL);
-
     // Parse envelope sender
     //
     if (!Parse_UntilSpace(par, pEnvSender)) {
@@ -2928,6 +2929,9 @@ bool Parse_Message(Parser *par, Mailbox *mbox, bool useAllData, Message **pMsg)
     if (!Parse_FromSpaceLine(par, &msg->envelope, &msg->envSender,
 			     &msg->envDate)) {
 	Parser_Warn(par, "Could not find a valid \"From \" line for message %s",
+		    String_CString(msg->tag));
+    } else if (String_IsEmpty(msg->envSender)) {
+	Parser_Warn(par, "Empty envelope sender for message %s",
 		    String_CString(msg->tag));
     }
 
@@ -3777,11 +3781,11 @@ void CheckMailbox(Mailbox *mbox, bool strict, bool repair)
 	// Got Message-ID?
 	//
 	value = Header_Get(msg->headers, &Str_MessageID);
-	if (value == NULL || String_Length(value) == 0) {
+	if (value == NULL || String_IsEmpty(value)) {
 	    source = &Str_XMessageID;
 	    value = Header_Get(msg->headers, source);
 
-	    if (value == NULL || String_Length(value) == 0) {
+	    if (value == NULL || String_IsEmpty(value)) {
 		String *synthID = Message_SynthesizeMessageID(msg);
 
 		Warn("Message %s: Missing Message-ID: header, %s with %s",
@@ -3984,7 +3988,7 @@ bool Message_Split(Message *msg, bool interactively)
 	    bool split = true;
 
 	    // Remove the newline from the string we parsed
-	    if (String_Length(line) > 0)
+	    if (!String_IsEmpty(line))
 		String_SetLength(line, String_Length(line) - 1);
 
 	    Note("Message %s: Found \"From \" line in body:\n %s",

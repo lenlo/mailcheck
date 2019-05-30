@@ -182,17 +182,28 @@ String_Define(Str_MessageID, "Message-ID");
 String_Define(Str_NL2FromSpace, "\n\nFrom ");
 String_Define(Str_NLFromSpace, "\nFrom ");
 String_Define(Str_Received, "Received");
+String_Define(Str_ResentBcc, "Resent-bcc");
+String_Define(Str_ResentCc, "Resent-cc");
+String_Define(Str_ResentDate, "Resent-Date");
+String_Define(Str_ResentFrom, "Resent-From");
+String_Define(Str_ResentMessageID, "Resent-Message-ID");
+String_Define(Str_ResentSender, "Resent-Sender");
+String_Define(Str_ResentSubject, "Resent-Subject");
+String_Define(Str_ResentTo, "Resent-To");
 String_Define(Str_ReturnPath, "Return-Path");
 String_Define(Str_Sender, "Sender");
 String_Define(Str_Status, "Status");
 String_Define(Str_Subject, "Subject");
 String_Define(Str_To, "To");
+String_Define(Str_Xcc, "X-cc");
 String_Define(Str_XDate, "X-Date");
 String_Define(Str_XFrom, "X-From");
 String_Define(Str_XIMAP, "X-IMAP");
 String_Define(Str_XIMAPBase, "X-IMAPBase");
 String_Define(Str_XKeywords, "X-Keywords");
 String_Define(Str_XMessageID, "X-Message-ID");
+String_Define(Str_XSubject, "X-Subject");
+String_Define(Str_XTo, "X-To");
 String_Define(Str_XUID, "X-UID");
 
 String_Define(Str_Body, "Body");
@@ -218,6 +229,7 @@ String_Define(Str_EnvelopeSender, "envelope sender");
 String_Define(Str_Plus, "+");
 String_Define(Str_Minus, "-");
 String_Define(Str_Colon, ":");
+String_Define(Str_Dollar, "$");
 
 String_Define(Str_True, "true");
 String_Define(Str_Strict, "strict");
@@ -3484,7 +3496,6 @@ int User_AskChoice(const char *question, const char *choices, char def)
 	if (ch == '\n')
 	    break;
 
-	ch = tolower(ch);
 	if (strchr(choices, ch) != NULL)
 	    answer = ch;
 
@@ -3683,36 +3694,35 @@ static int FindIllegalChar(String *str, bool controlOK, bool eightBitOK)
 
 typedef struct {
     bool repair;		// Are we repairing?
-    bool all;			// Should we repair everything w/o asking?
+    char autoChoice;		// Should this choice apply without asking?
     bool quit;			// Have the user told us to quit repairing?
 } RepairState;
 
 void InitRepairState(RepairState *state, bool repair)
 {
     state->repair = repair;
-    state->all = !gInteractive;
+    state->autoChoice = gInteractive ? '\0' : 'y';
     state->quit = false;
 }
 
 bool IsRepairingAll(RepairState *state)
 {
-    return state->repair && state->all;
+    return state->repair && state->autoChoice == 'y';
 }
 
 bool ShouldRepair(RepairState *state)
 {
-    int choice = 'y';
+    int choice = state->autoChoice;
 
     if (!state->repair)
 	return false;
 
-    if (!state->all)
-	choice = User_AskChoice(" Repair?", "ynq!", 'y');
+    if (choice == '\0')
+	choice = User_AskChoice(" Repair [ynq]?", "ynYNq", 'y');
 
-    if (choice == '!') {
-	state->all = true;
-	choice = 'y';
-    }
+    // An uppercase answer will apply to all remaining questions
+    if (isupper(choice))
+	choice = state->autoChoice = tolower(choice);
 
     state->quit = (choice == 'q');
 
@@ -3754,7 +3764,8 @@ void CheckMailbox(Mailbox *mbox, bool strict, bool repair)
 		    RepairDovecotFromSpaceBugBody(msg);
 		    // Repairing the message will change it's length
 		    bodyLength = Message_BodyLength(msg);
-		}
+		} else if (state.quit)
+		    break;
 
 	    } else {
 		if (value == NULL)
@@ -3767,11 +3778,11 @@ void CheckMailbox(Mailbox *mbox, bool strict, bool repair)
 			 String_PrettyCString(value), bodyLength,
 			 IsRepairingAll(&state) ? " (repairing)" : "");
 
-		if (!ShouldRepair(&state))
-		    continue;
-
-		Header_Set(msg->headers, &Str_ContentLength,
-			   String_PrintF("%d", bodyLength));
+		if (ShouldRepair(&state))
+		    Header_Set(msg->headers, &Str_ContentLength,
+			       String_PrintF("%d", bodyLength));
+		else if (state.quit)
+		    break;
 	    }
 	}
 
@@ -3790,14 +3801,12 @@ void CheckMailbox(Mailbox *mbox, bool strict, bool repair)
 		     IsRepairingAll(&state) ? "replacing" : "could replace",
 		     String_CString(synthID));
 
-		if (ShouldRepair(&state)) {
+		if (ShouldRepair(&state))
 		    Header_Set(msg->headers, &Str_MessageID, synthID);
-		}
+		else if (state.quit)
+		    break;
 	    }
 	}
-
-	if (state.quit)
-	    break;
 
 	// Only strict tests below
 	//
@@ -3813,9 +3822,10 @@ void CheckMailbox(Mailbox *mbox, bool strict, bool repair)
 		 String_CString(msg->tag), String_CString(value),
 		 IsRepairingAll(&state) ? " (removing)" : "");
 
-	    if (ShouldRepair(&state)) {
+	    if (ShouldRepair(&state))
 		Header_Delete(msg->headers, &Str_GTFromSpace, false);
-	    }
+	    else if (state.quit)
+		break;
 	}
 
 	// Got From?
@@ -3853,13 +3863,12 @@ void CheckMailbox(Mailbox *mbox, bool strict, bool repair)
 		if (ShouldRepair(&state)) {
 		    Header_Set(msg->headers, &Str_From, value);
 		    value = NULL;
-		}
+		} else if (state.quit)
+		    break;
 	    }
 
 	    String_Free(value);
 	}
-	if (state.quit)
-	    break;
 
 	// Got Date?
 	//
@@ -3908,13 +3917,12 @@ void CheckMailbox(Mailbox *mbox, bool strict, bool repair)
 		if (ShouldRepair(&state)) {
 		    Header_Set(msg->headers, &Str_Date, value);
 		    value = NULL;
-		}
+		} else if (state.quit)
+		    break;
 	    }
 
 	    String_Free(value);
 	}
-	if (state.quit)
-	    break;
 
 	// Make sure there's no (undeclared) binary data in headers or body
 	//
@@ -4406,8 +4414,6 @@ void FindMessages(Stream *output, Mailbox *mbox, const String *key,
     Message *msg;
     int numWidth = IntLength(mbox->count);
 
-    printf("# FindMessages: '%s' '%s'\n", String_CString(key), String_CString(string));
-
     if (String_IsEqual(key, &Str_Body, false))
 	key = kSearchBody;
 
@@ -4485,7 +4491,7 @@ void DiffMessages(Message *a, Message *b)
     Stream_Free(tmpb, true);
 }
 
-int ChooseMessageToDelete(Message *a, Message *b)
+int ChooseMessageToDelete(Message *a, Message *b, char *autoChoice)
 {
     Stream_PrintF(gStdOut, "\n");
 
@@ -4495,18 +4501,29 @@ int ChooseMessageToDelete(Message *a, Message *b)
     Stream_WriteNewline(gStdOut);
 
     for (;;) {
-	switch (User_AskChoice("Please choose which message to delete "
-			       "(or b(oth), d(iff), or n(either)):",
-			       "12bdn", 'n')) {
+	char choice = *autoChoice;
+
+	if (choice == '\0')
+	    choice = User_AskChoice("Please choose which message to delete "
+				    "(or b(oth), d(iff), or n(either)):",
+				    "12bnBNdq", 'n');
+
+	if (isupper(choice))
+	    choice = *autoChoice = tolower(choice);
+
+	switch (choice) {
 	  case '1':
+	    Note("Deleting the first message]");
 	    Message_SetDeleted(a, true);
 	    return 1;
 
 	  case '2':
+	    Note("Deleting the second message]");
 	    Message_SetDeleted(b, true);
 	    return 1;
 
 	  case 'b':
+	    Note("Deleting both messages]");
 	    Message_SetDeleted(a, true);
 	    Message_SetDeleted(b, true);
 	    return 2;
@@ -4515,8 +4532,12 @@ int ChooseMessageToDelete(Message *a, Message *b)
 	    DiffMessages(a, b);
 	    break;
 
-	  default:
+	  case 'n':
+	    Note("Deleting no messages]");
 	    return 0;
+
+	  case 'q':
+	    return -1;
 	}
     }
 }
@@ -4525,8 +4546,9 @@ void UniqueMailbox(Mailbox *mbox)
 {
     Array *mary = SplitMessages(mbox, NULL);
     int i, count = Array_Count(mary);
-    int dups = 0;
+    int allDups = 0;
     Message *m, *n;
+    char autoChoice = '\0';
 
     SortMessages(mary);
 
@@ -4537,8 +4559,13 @@ void UniqueMailbox(Mailbox *mbox)
 	if (!Message_IsDeleted(m) && !Message_IsDeleted(n) &&
 	    m->cachedID != NULL && n->cachedID != NULL &&
 	    String_IsEqual(m->cachedID, n->cachedID, true)) {
-	    static String const *checkKeys[] =
-		{&Str_From, &Str_To, &Str_Subject, &Str_Date, NULL};
+	    static String const *checkKeys[] = {
+		&Str_From, &Str_To, &Str_Cc, &Str_Bcc, &Str_Subject, &Str_Date,
+		&Str_ResentFrom, &Str_ResentTo, &Str_ResentCc, &Str_ResentBcc,
+		&Str_ResentSubject, &Str_ResentDate, &Str_ResentMessageID,
+		&Str_XFrom, &Str_XTo, &Str_Xcc, &Str_XSubject, &Str_XDate,
+		NULL
+	    };
 	    const String **ss;
 	    bool same = true;
 
@@ -4576,17 +4603,20 @@ void UniqueMailbox(Mailbox *mbox)
 		     String_CString(n->tag),
 		     String_PrettyCString(m->cachedID)); 
 		Message_SetDeleted(n, true);
-		dups++;
+		allDups++;
 
 	    } else if (gInteractive) {
-		dups += ChooseMessageToDelete(m, n);
+		int dups = ChooseMessageToDelete(m, n, &autoChoice);
+		if (dups < 0)
+		    break;
+		allDups += dups;
 	    }
 	}
     }
 
     Note("%s %d duplicate%s",
-	 dups == 0 ? "Found" : "Deleted",
-	 dups, dups == 1 ? "" : "s");
+	 allDups == 0 ? "Found" : "Deleted",
+	 allDups, allDups == 1 ? "" : "s");
 
     Array_Free(mary);
 }
@@ -4600,6 +4630,7 @@ typedef enum {
     kCmd_Check,
     kCmd_Delete,
     kCmd_DeleteAndShowNext,
+    kCmd_Diff,
     kCmd_Edit,
     kCmd_Exit,
     kCmd_Find,
@@ -4649,6 +4680,8 @@ CommandTable kCommandTable[] = {
      "check the mailbox' internal consistency"},
     {"delete",	"[<msgs>]",	kCmd_Delete,
      "mark one or more messages as deleted"},
+    {"diff",	"<msg1> <msg2>", kCmd_Diff,
+     "compare two messages and show the differences"},
     {"dp",	NULL,		kCmd_DeleteAndShowNext,
      "delete the current message, then show the next message"},
     {"edit",	"[<msg>]",	kCmd_Edit,
@@ -4723,9 +4756,7 @@ bool NoNextArg(int *pIndex, Array *args)
 
 int String_ToMessageNumber(const String *str, Mailbox *mbox)
 {
-    const String *dollar = String_FromCString("$", false);
-
-    if (String_IsEqual(str, dollar, false))
+    if (String_IsEqual(str, &Str_Dollar, true))
 	return Mailbox_Count(mbox);
 
     return String_ToInteger(str, -1);
@@ -4808,11 +4839,12 @@ bool TrueString(const String *str, bool def)
 
 Message *GetMessageByNumber(Mailbox *mbox, int cur)
 {
-    Message *msg;
+    Message *msg = NULL;
     int i;
 
-    for (msg = Mailbox_Root(mbox), i = 1; msg != NULL && i < cur;
-	 msg = msg->next, i++);
+    if (cur > 0)
+	for (msg = Mailbox_Root(mbox), i = 1; msg != NULL && i < cur;
+	     msg = msg->next, i++);
 
     if (msg == NULL)
 	Error("Message %d does not exist", cur);
@@ -5040,6 +5072,22 @@ void RunLoop(Mailbox *mbox, Array *commands)
 		goto show_next;
 	    }
 	    break;
+
+	  case kCmd_Diff: {
+	      arg = NextArg(&argi, args, true);
+	      if (arg == NULL) break;
+	      Message *msg1 =
+		  GetMessageByNumber(mbox, String_ToMessageNumber(arg, mbox));
+	      if (msg1 == NULL) break;
+	      arg = NextArg(&argi, args, true);
+	      if (arg == NULL) break;
+	      Message *msg2 =
+		  GetMessageByNumber(mbox, String_ToMessageNumber(arg, mbox));
+	      if (msg2 == NULL) break;
+
+	      DiffMessages(msg1, msg2);
+	      break;
+	  }
 
 	  case kCmd_List:
 	    arg = NextArg(&argi, args, false);

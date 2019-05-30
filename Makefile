@@ -10,7 +10,7 @@
 #	It's experimental and the code should run fine without it.
 #
 
-OPT=		-O
+#OPT=		-O
 CFLAGS=		-g $(OPT) -Wall -DDEBUG -DUSE_READLINE # -DUSE_GC
 LOADLIBES=	-lreadline # -lgc
 

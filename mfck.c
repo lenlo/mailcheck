@@ -3549,26 +3549,26 @@ void MessageSet_Free(MessageSet *set)
 // Parse a message set specification of the form:
 //   <min>['-'[<max>]][','...] | '*'
 //
-bool Parse_MessageSet(Parser *par, MessageSet **pSet, int maxMax)
+bool Parse_MessageSet(Parser *par, MessageSet **pSet, int last)
 {
     int min, max;
     MessageSet *link = NULL;
 
     if (Parse_ConstChar(par, '*', true, NULL)) {
 	min = 1;
-	max = maxMax;
+	max = last;
 
     } else {
 	if (!Parse_Integer(par, &min))
 	return false;
 	if (Parse_ConstChar(par, '-', true, NULL)) {
 	    if (!Parse_Integer(par, &max))
-		max = maxMax;
+		max = last;
 	} else {
 	    max = min;
 	}
 	if (Parse_ConstChar(par, ',', true, NULL)) {
-	    (void) Parse_MessageSet(par, &link, maxMax);
+	    (void) Parse_MessageSet(par, &link, last);
 	}
     }
 
@@ -4765,7 +4765,7 @@ int String_ToMessageNumber(const String *str, Mailbox *mbox)
     return String_ToInteger(str, -1);
 }
 
-MessageSet *MessageSetArg(String *arg, int maxMax)
+MessageSet *MessageSetArg(String *arg, int last)
 {
     Parser parser;
     MessageSet *set = NULL;
@@ -4774,8 +4774,7 @@ MessageSet *MessageSetArg(String *arg, int maxMax)
 	return NULL;
 
     Parser_Set(&parser, arg);
-    if (!Parse_MessageSet(&parser, &set, maxMax) ||
-	!Parser_AtEnd(&parser)) {
+    if (!Parse_MessageSet(&parser, &set, last) || !Parser_AtEnd(&parser)) {
 	Error("Malformed message set: %s", String_CString(arg));
 	MessageSet_Free(set);
 	return NULL;

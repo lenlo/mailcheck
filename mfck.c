@@ -286,6 +286,7 @@ static inline int iMax(int a, int b)	{return a > b ? a : b;}
 */
 
 static inline bool Char_IsNewline(int ch) {return ch == '\r' || ch == '\n';}
+static inline bool Char_IsDigit(int ch) {return isdigit(ch);}
 
 const char *Char_QuotedCString(char ch)
 {
@@ -4666,6 +4667,7 @@ typedef enum {
     kCmd_ListNext,
     kCmd_ListPrevious,
     kCmd_Repair,
+    kCmd_Run,
     kCmd_Save,
     kCmd_Show,
     kCmd_ShowPrevious,
@@ -4736,6 +4738,8 @@ CommandTable kCommandTable[] = {
      "leave the mailbox without saving any changes"},
     {"repair",	"[strict]",	kCmd_Repair,
      "check the mailbox' internal state and repair if needed"},
+    {"run",	"[<msgs>] <cmd> [<args>]", kCmd_Run,
+     "execute the command repeatedly with each of the messages as input"},
     {"save",	"[<msgs>] <file>", kCmd_Save,
      "save the messages to the given file"},
     {"split",	"[<msgs>]",	kCmd_Split,
@@ -4788,7 +4792,7 @@ int String_ToMessageNumber(const String *str, Mailbox *mbox)
     return String_ToInteger(str, -1);
 }
 
-MessageSet *MessageSetArg(String *arg, int last)
+MessageSet *MessageSetArg(const String *arg, int last)
 {
     Parser parser;
     MessageSet *set = NULL;
@@ -4962,6 +4966,38 @@ char *CompleteCommand(const char *prefix, int state)
     return NULL;
 }
 #endif
+
+bool RunCommand(Message *msg, int index, Array *args)
+{
+    // XXX: Should be more efficient
+    String *command = Array_JoinTail(args, &Str_Space, index);
+
+    FILE *file = popen(String_CString(command), "w");
+
+    if (file == NULL) {
+	perror(String_CString(command));
+	String_Free(command);
+	return false;
+    }
+
+    Stream *stream =
+	Stream_New(file, String_Clone(Array_GetAt(args, index)), false);
+
+    Stream_WriteHeaders(stream, msg->headers);
+    Stream_WriteNewline(stream);
+    Stream_WriteString(stream, Message_Body(msg));
+
+    Stream_Free(stream, false);
+
+    if (pclose(file) != 0) {
+	perror(String_CString(command));
+	String_Free(command);
+	return false;
+    }
+
+    String_Free(command);
+    return true;
+}
 
 void RunLoop(Mailbox *mbox, Array *commands)
 {
@@ -5250,6 +5286,28 @@ void RunLoop(Mailbox *mbox, Array *commands)
 	    if (msg != NULL) {
 		EditMessage(msg);
 		cur = num;
+	    }
+	    break;
+
+	  case kCmd_Run:
+	    // Do we have a message set arg?
+	    arg = NextArg(&argi, args, true);
+	    if (Char_IsDigit(String_CharAt(arg, 0))) {
+		set = MessageSetArg(arg, msgCount);
+	    } else {
+		argi--;
+		set = MessageSet_Make(cur, cur, NULL);
+	    }
+
+	    // Make sure that we have a command
+	    NextArg(&argi, args, true);
+	    argi--;
+
+	    for (num = MessageSet_First(set); num != -1;
+		 num = MessageSet_Next(set, num)) {
+		msg = GetMessageByNumber(mbox, num);
+		if (msg != NULL && !RunCommand(msg, argi, args))
+		    break;
 	    }
 	    break;
 

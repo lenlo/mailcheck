@@ -179,8 +179,6 @@ String_Define(Str_From, "From");
 String_Define(Str_FromSpace, "From ");
 String_Define(Str_GTFromSpace, ">From ");
 String_Define(Str_MessageID, "Message-ID");
-String_Define(Str_NL2FromSpace, "\n\nFrom ");
-String_Define(Str_NLFromSpace, "\nFrom ");
 String_Define(Str_Received, "Received");
 String_Define(Str_ResentBcc, "Resent-bcc");
 String_Define(Str_ResentCc, "Resent-cc");
@@ -2450,6 +2448,31 @@ bool Parse_FromSpaceLine(Parser *par, String **pLine, String **pEnvSender,
     return success;
 }
 
+// Return true and update the parser to point to the next "From " line given
+// that it is preceeded by the required number of newlines. Otherwise, return
+// false and don't move the parser position.
+//
+bool Parse_UntilFromSpace(Parser *par, int newlines)
+{
+    int savedPos = Parser_Position(par);
+
+    while (Parse_UntilString(par, &Str_FromSpace, true, NULL)) {
+	int i, pos = Parser_Position(par);
+
+	for (i = 0; i < newlines && Parse_BackupNewline(par); i++);
+	// We succeeded if we found enough newlines before the From_
+	// line *and* we didn't go back before our starting position.
+	if (i == newlines && Parser_Position(par) > savedPos)
+	    return true;
+
+	Parser_MoveTo(par, pos + String_Length(&Str_FromSpace));
+    }
+
+    Parser_MoveTo(par, savedPos);
+
+    return false;
+}
+
 void WarnContentLength(Message *msg, int contLen, int bodyLen)
 {
     int delta = abs(contLen - bodyLen);
@@ -2755,7 +2778,7 @@ void MoveToEndOfMessage(Parser *par, Message *msg)
 		int lastPos = -1;
 		int fromPos = -1;
 
-		while (Parse_UntilString(par, &Str_NL2FromSpace, true, NULL)) {
+		while (Parse_UntilFromSpace(par, 2)) {
 		    // Remember the pos between the newlines -- that's
 		    // the proper (tentative) end of the message.
 		    //
@@ -2796,7 +2819,7 @@ void MoveToEndOfMessage(Parser *par, Message *msg)
 
 		int fromPos = -1;
 
-		while (Parse_UntilString(par, &Str_NL2FromSpace, true, NULL)) {
+		while (Parse_UntilFromSpace(par, 2)) {
 		    Parse_Newline(par, NULL);
 		    fromPos = Parser_Position(par);
 		    Parse_Newline(par, NULL);
@@ -2876,7 +2899,7 @@ void MoveToEndOfMessage(Parser *par, Message *msg)
 	    Parser_MoveTo(par, pos);
 	    return;
 	}
-    } while (Parse_UntilString(par, &Str_NLFromSpace, true, NULL) &&
+    } while (Parse_UntilFromSpace(par, 1) &&
 	     (pos = Parser_Position(par)) &&
 	     Parse_Newline(par, NULL));
 #else
@@ -2890,7 +2913,7 @@ void MoveToEndOfMessage(Parser *par, Message *msg)
      */
     Parse_BackupNewline(par);
     
-    while (Parse_UntilString(par, &Str_NLFromSpace, true, NULL)) {
+    while (Parse_UntilFromSpace(par, 1)) {
         int pos = Parser_Position(par);
 
 	(void) Parse_Newline(par, NULL);
@@ -3983,7 +4006,7 @@ bool Message_Split(Message *msg, bool interactively)
     for (;;) {
 	String *line;
 
-	if (!Parse_UntilString(&parser, &Str_NL2FromSpace, true, NULL))
+	if (!Parse_UntilFromSpace(&parser, 2))
 	    break;
 
 	if (!Parse_Newline(&parser, NULL) || !Parse_Newline(&parser, NULL))

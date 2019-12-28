@@ -2114,6 +2114,7 @@ bool Parse_Header(Parser *par, Header **phead)
 		Parser_MoveTo(par, pos);
 		Parser_Warn(par, "Encountered unexpected \"From \" line in "
 			    "headers {@%d}", Parser_Position(par));
+		Header_Free(head, false);
 		return false;
 	    }
 	    /* Or is it a ">From" line?
@@ -2392,41 +2393,81 @@ void Message_SetDeleted(Message *msg, bool flag)
 static bool ParseFromSpaceHelper(Parser *par, String **pEnvSender,
 				 struct tm *pEnvTime)
 {
-    int pos = Parser_Position(par);
+    int savedpos = Parser_Position(par);
 
-    // Got "From "?
+
+    if (pEnvSender != NULL)
+	*pEnvSender = NULL;
+
+    // A typical "FromSpace" line will look like this:
     //
+    //   "From" <space> <sender> <space> <date> <newline>
+    //
+    // with only once space for each <space>, but unfortunately,
+    // the world is not always so simple. Sometimes, there are
+    // multiple spaces where there should only be one, sometimes
+    // the <date> may be suffixed by "remote from <site" like in
+    // the old uucp days, and sometimes the <sender> may contain
+    // a whole RFC822 address phrase with comments and spaces
+    // (I'm looking at you, YahooGroups!)
+    //
+    // In order to deal with this mess, we will make two attempts
+    // at parsing the FromSpace line: One that accepts a simple
+    // address as <sender>, but garbage after the <date>, and one
+    // that accepts a long complicated <sender>, but wants a
+    // <newline> directly after the <date>.
+
+    // Look for "From " first of all
+
     if (!Parse_ConstString(par, &Str_FromSpace, true, NULL))
 	return false;
 
-    // Parse envelope sender
+    int senderpos = Parser_Position(par);
+
+    // Try <sender> <date>...<newline>
     //
-    if (!Parse_UntilSpace(par, pEnvSender)) {
-	Parser_MoveTo(par, pos);
+    if (Parse_UntilSpace(par, pEnvSender) &&
+	Parse_Spaces(par, NULL) &&
+	Parse_CTime(par, pEnvTime) &&
+	Parse_UntilNewline(par, NULL) &&
+	Parse_Newline(par, NULL))
+	return true;
+
+    String_FreeP(pEnvSender);
+    Parser_MoveTo(par, senderpos);
+
+    // Try <sender-with-comments> <date><newline>
+    //
+    // First look for newline.
+    //
+    if (!Parse_UntilNewline(par, NULL)) {
+	Parser_MoveTo(par, savedpos);
 	return false;
     }
 
-    // There still shouldn't be more than one space, but just in case...
+    // The date is always 24 chars long.
     //
-    (void) Parse_Spaces(par, NULL);
+    int nlpos = Parser_Position(par);
+    Parser_MoveTo(par, nlpos - 24);
 
-    // Parse envelope date in ctime format
+    // Try get the date
     //
     if (!Parse_CTime(par, pEnvTime)) {
-	String_FreeP(pEnvSender);
-	Parser_MoveTo(par, pos);
+	Parser_MoveTo(par, savedpos);
 	return false;
     }
 
-    // Allow possible "garbage" to come after the timestamp,
-    // e.g. "remote from foobar" like in the old uucp days.
+    // Finally, the grab the sender
+    //
+    if (pEnvSender != NULL) {
+	Parser_MoveTo(par, senderpos);
+	Parse_StringStart(par, pEnvSender);
+	Parser_MoveTo(par, nlpos - 24);
+	Parse_StringEnd(par, *pEnvSender);
+    }
 
-    (void) Parse_UntilNewline(par, NULL);
-    if (!Parse_Newline(par, NULL)) {
-	String_FreeP(pEnvSender);
-	Parser_MoveTo(par, pos);
-	return false;
-    }	
+    Parser_MoveTo(par, nlpos);
+    Parse_Newline(par, NULL);
 
     return true;
 }

@@ -4977,9 +4977,9 @@ void ShowHelp(Stream *output, String *cmd)
 
 	for (ct = kCommandTable; ct->name != NULL; ct++) {
 	    if (isAll || String_IsEqual(cmd, ct->name, false)) {
-	    int width = 1 + String_Length(ct->name) + 1 + 1;
-	    if (ct->cargs != NULL)
-		width += strlen(ct->cargs);
+		int width = 1 + String_Length(ct->name) + 1 + 1;
+		if (ct->cargs != NULL)
+		    width += strlen(ct->cargs);
 
 		Stream_PrintF(output, " %s %s %*s-- %s\n",
 			      ct->cname, ct->cargs != NULL ? ct->cargs : "",

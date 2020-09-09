@@ -1827,8 +1827,8 @@ String *String_RFC822Date(struct tm *tm, bool withTimeZone)
 			     tm->tm_mday, String_CString(kMonths[tm->tm_mon]),
 			     tm->tm_year, tm->tm_hour, tm->tm_min, tm->tm_sec,
 			     tm->tm_gmtoff > 0 ? '+' : '-',
-			     abs(tm->tm_gmtoff / 3600),
-			     abs(tm->tm_gmtoff / 60 % 60));
+			     labs(tm->tm_gmtoff / 3600),
+			     labs(tm->tm_gmtoff / 60 % 60));
 }
 
 void Stream_WriteCTime(Stream *output, struct tm *tm)
@@ -4313,8 +4313,8 @@ int ChooseMessageToDelete(Message *a, Message *b)
 
     for (;;) {
 	switch (User_AskChoice("Please choose which message to delete "
-			       "(or b(oth), d(iff), or n(either)):",
-			       "12bdn", 'n')) {
+			       "(or b(oth), d(iff), or n(either) (or q(uit))):",
+			       "12bdenx", 'n')) {
 	  case '1':
 	    Message_SetDeleted(a, true);
 	    return 1;
@@ -4331,6 +4331,12 @@ int ChooseMessageToDelete(Message *a, Message *b)
 	  case 'd':
 	    DiffMessages(a, b);
 	    break;
+
+	  case 'e':
+	  case 'q':
+	  case 'x':
+	    Stream_PrintF(gStdOut, "Exiting...\n");
+	    return -1;
 
 	  default:
 	    return 0;
@@ -4396,7 +4402,10 @@ void UniqueMailbox(Mailbox *mbox)
 		dups++;
 
 	    } else if (gInteractive) {
-		dups += ChooseMessageToDelete(m, n);
+		int ret = ChooseMessageToDelete(m, n);
+		if (ret < 0)
+		    break;
+		dups += ret;
 	    }
 	}
     }

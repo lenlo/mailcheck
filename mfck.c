@@ -1,7 +1,7 @@
 /*
 **  mfck -- A mailbox checking tool (and more!)
 **
-**  Copyright (c) 2008-2010 by Lennart Lovstrand <mfck@lenlolabs.com>
+**  Copyright (c) 2008-2019 by Lennart Lovstrand <mfck@lenlolabs.com>
 */
 
 #include <stdio.h>
@@ -22,11 +22,14 @@
 #include <sys/types.h>
 #include <dirent.h>
 #include <limits.h>
+#include <sys/ioctl.h>
 
 #ifdef USE_READLINE
 #  include <readline/readline.h>
 #  include <readline/history.h>
 #endif
+
+#include "md5.h"
 
 #ifdef USE_GC
 #  ifdef DEBUG
@@ -37,6 +40,8 @@
 #  define realloc				GC_REALLOC
 #  define free					GC_FREE
 #endif
+
+#include "vers.h"
 
 #define OPT_FUZZY_NEWLINE
 #define OPT_LOCK_FILE
@@ -64,6 +69,8 @@
 
 #define kString_ExcerptLength			50
 
+#define kSyntheticMessageIDSuffix		"@synthesized-by-mfck"
+
 #define String_Define(NAM, CSTR)			\
     const String NAM = {CSTR, sizeof(CSTR)-1, kString_Const};
 
@@ -71,6 +78,8 @@ typedef enum {false = 0, true = !false} bool;
 
 typedef enum {kString_Shared = 0, kString_Alloced, kString_Mapped,
 	      kString_Const} StringType;
+
+#define kString_NotFound			-1
 
 typedef void Free(void *);
 
@@ -154,7 +163,7 @@ typedef struct {
 */
 
 // General Strings
-String_Define(Str_Emtpy, "");
+String_Define(Str_Empty, "");
 String_Define(Str_Newline, "\n");
 String_Define(Str_Space, " ");
 String_Define(Str_TwoDashes, "--");
@@ -168,22 +177,34 @@ String_Define(Str_ContentType, "Content-Type");
 String_Define(Str_Date, "Date");
 String_Define(Str_From, "From");
 String_Define(Str_FromSpace, "From ");
+String_Define(Str_GTFromSpace, ">From ");
 String_Define(Str_MessageID, "Message-ID");
-String_Define(Str_NL2FromSpace, "\n\nFrom ");
-String_Define(Str_NLFromSpace, "\nFrom ");
 String_Define(Str_Received, "Received");
+String_Define(Str_ResentBcc, "Resent-bcc");
+String_Define(Str_ResentCc, "Resent-cc");
+String_Define(Str_ResentDate, "Resent-Date");
+String_Define(Str_ResentFrom, "Resent-From");
+String_Define(Str_ResentMessageID, "Resent-Message-ID");
+String_Define(Str_ResentSender, "Resent-Sender");
+String_Define(Str_ResentSubject, "Resent-Subject");
+String_Define(Str_ResentTo, "Resent-To");
 String_Define(Str_ReturnPath, "Return-Path");
 String_Define(Str_Sender, "Sender");
 String_Define(Str_Status, "Status");
 String_Define(Str_Subject, "Subject");
 String_Define(Str_To, "To");
+String_Define(Str_Xcc, "X-cc");
 String_Define(Str_XDate, "X-Date");
 String_Define(Str_XFrom, "X-From");
 String_Define(Str_XIMAP, "X-IMAP");
 String_Define(Str_XIMAPBase, "X-IMAPBase");
 String_Define(Str_XKeywords, "X-Keywords");
 String_Define(Str_XMessageID, "X-Message-ID");
+String_Define(Str_XSubject, "X-Subject");
+String_Define(Str_XTo, "X-To");
 String_Define(Str_XUID, "X-UID");
+
+String_Define(Str_Body, "Body");
 
 // Content-Transfer-Encodings
 String_Define(Str_Binary, "binary");
@@ -196,6 +217,7 @@ String_Define(Str_Boundary, "boundary");
 // Other Strings
 String_Define(Str_All, "all");
 String_Define(Str_Check, "check");
+String_Define(Str_List, "list");
 String_Define(Str_Repair, "repair");
 String_Define(Str_Unique, "unique");
 
@@ -204,9 +226,11 @@ String_Define(Str_EnvelopeSender, "envelope sender");
 
 String_Define(Str_Plus, "+");
 String_Define(Str_Minus, "-");
+String_Define(Str_Colon, ":");
+String_Define(Str_Dollar, "$");
 
 String_Define(Str_True, "true");
-String_Define(Str_Stringent, "stringent");
+String_Define(Str_Strict, "strict");
 
 String_Define(Str_DotLock, ".lock");
 
@@ -214,7 +238,6 @@ String_Define(Str_DotLock, ".lock");
 **  Global Variables
 */
 
-bool gAddContentLength = false;
 bool gAutoWrite = false;
 bool gBackup = false;
 bool gCheck = false;
@@ -225,10 +248,11 @@ bool gDryRun = false;
 bool gInteractive = false;
 bool gMap = true;
 bool gShowContext = false;
-bool gStringent = false;
+bool gStrict = false;
 bool gQuiet = false;
 bool gUnique = false;
 bool gVerbose = false;
+//bool gWantContentLength = false;
 
 int gWarnings = 0;
 int gMessageCounter = 0;
@@ -241,9 +265,8 @@ jmp_buf *gInterruptReentry = NULL;
 FILE *gOpenPipe = NULL;
 
 const char gVersion[] = "mfck version 1.0";
-const char gRevision[] = "$Rev$";
 const char gCopyright[] =
-    "Copyright (c) 2008-2010, Lennart Lovstrand <mfck@lenlolabs.com>";
+    "Copyright (c) 2008-2017, Lennart Lovstrand <mfck@lenlolabs.com>";
 
 /*
 **  Forward Declarations
@@ -255,14 +278,15 @@ void Exit(int ret);
 **  Math Functions
 */
 
-inline int iMin(int a, int b)	{return a < b ? a : b;}
-inline int iMax(int a, int b)	{return a > b ? a : b;}
+static inline int iMin(int a, int b)	{return a < b ? a : b;}
+static inline int iMax(int a, int b)	{return a > b ? a : b;}
 
 /*
 **  Char Functions
 */
 
-inline bool Char_IsNewline(int ch)	{return ch == '\r' || ch == '\n';}
+static inline bool Char_IsNewline(int ch) {return ch == '\r' || ch == '\n';}
+static inline bool Char_IsDigit(int ch) {return isdigit(ch);}
 
 const char *Char_QuotedCString(char ch)
 {
@@ -460,45 +484,47 @@ void *xalloc(void *mem, size_t size)
 **  refereces still in use to its chars.
 */
 
-inline const char *String_Chars(const String *str)
+static inline const char *String_Chars(const String *str)
 {
     return str == NULL ? NULL : str->buf;
 }
 
-inline int String_Length(const String *str)
+static inline int String_Length(const String *str)
 {
     return str == NULL ? 0 : str->len;
 }
 
-inline const char *String_End(const String *str)
+#ifdef NOT_CURRENTLY_USED
+static inline const char *String_End(const String *str)
 {
     return str == NULL ? NULL : str->buf + str->len;
 }
+#endif
 
-inline const String *String_Safe(String *str)
+static inline const String *String_Safe(String *str)
 {
-    return str != NULL ? str : &Str_Emtpy;
+    return str != NULL ? str : &Str_Empty;
 }
 
-inline void String_SetChars(String *str, const char *buf)
+static inline void String_SetChars(String *str, const char *buf)
 {
     str->buf = buf;
 }
 
-inline void String_SetLength(String *str, int len)
+static inline void String_SetLength(String *str, int len)
 {
     str->len = len;
     if (str->type == kString_Alloced)
 	((char *) str->buf)[len] = '\0';
 }
 
-inline void String_Set(String *str, const char *buf, int len)
+static inline void String_Set(String *str, const char *buf, int len)
 {
     str->buf = buf;
     str->len = len;
 }
 
-inline String *String_New(StringType type, const char *chars, int length)
+static inline String *String_New(StringType type, const char *chars, int length)
 {
     String *str = New(String);
     String_Set(str, chars, length);
@@ -506,14 +532,14 @@ inline String *String_New(StringType type, const char *chars, int length)
     return str;
 }
 
-inline int String_CharAt(const String *str, int pos)
+static inline int String_CharAt(const String *str, int pos)
 {
     if (pos < 0 || pos >= String_Length(str))
 	return EOF;
     return String_Chars(str)[pos];
 }
 
-inline String *String_Sub(const String *str, int start, int end)
+static inline String *String_Sub(const String *str, int start, int end)
 {
     return String_New(kString_Shared, String_Chars(str) + start, end - start);
 }
@@ -610,13 +636,19 @@ String *String_Append(const String *sub, ...)
 
 // Change the string by adjusting its start and length
 //
-inline void String_Adjust(String *str, int offset)
+static inline void String_Adjust(String *str, int offset)
 {
     str->buf += offset;
     str->len -= offset;
 }
 
-inline bool String_IsEqual(const String *a, const String *b, bool sameCase)
+static inline bool String_IsEmpty(const String *str)
+{
+    return String_Length(str) == 0;
+}
+
+static inline bool String_IsEqual(const String *a, const String *b,
+				  bool sameCase)
 {
     if (String_Length(a) != String_Length(b))
 	return false;
@@ -626,19 +658,38 @@ inline bool String_IsEqual(const String *a, const String *b, bool sameCase)
 	strncasecmp(String_Chars(a), String_Chars(b), String_Length(b)) == 0;
 }
 
-inline bool String_HasPrefix(const String *str, const String *sub,
-			     bool sameCase)
+static inline bool String_HasPrefix(const String *str, const String *sub,
+				    bool sameCase)
 {
-    if (String_Length(str) < String_Length(sub))
+    int stlen = String_Length(str);
+    int sulen = String_Length(sub);
+
+    if (stlen < sulen)
 	return false;
 
-    return sameCase ?
-	strncmp(String_Chars(str), String_Chars(sub), String_Length(sub)) == 0 :
-	strncasecmp(String_Chars(str), String_Chars(sub),
-		    String_Length(sub)) == 0;
+    return (sameCase ?
+	    strncmp(String_Chars(str), String_Chars(sub), sulen) :
+	    strncasecmp(String_Chars(str), String_Chars(sub), sulen)) == 0;
 }
 
-inline int String_Compare(const String *a, const String *b, bool sameCase)
+static inline bool String_HasSuffix(const String *str, const String *sub,
+				    bool sameCase)
+{
+    int stlen = String_Length(str);
+    int sulen = String_Length(sub);
+
+    if (stlen < sulen)
+	return false;
+
+    return (sameCase ?
+	    strncmp(String_Chars(str) + stlen - sulen, String_Chars(sub),
+		    sulen) :
+	    strncasecmp(String_Chars(str) + stlen - sulen, String_Chars(sub),
+			sulen)) == 0;
+}
+
+static inline int String_Compare(const String *a, const String *b,
+				 bool sameCase)
 {
     const char *ap, *bp;
     int i, minlen = iMin(String_Length(a), String_Length(b));
@@ -654,15 +705,17 @@ inline int String_Compare(const String *a, const String *b, bool sameCase)
     return String_Length(a) - String_Length(b);
 }
 
-inline int String_CompareCI(const String *a, const String *b)
+#ifdef NOT_CURRENTLY_USED
+static inline int String_CompareCI(const String *a, const String *b)
 {
     return String_Compare(a, b, false);
 }
 
-inline int String_CompareCS(const String *a, const String *b)
+static inline int String_CompareCS(const String *a, const String *b)
 {
     return String_Compare(a, b, true);
 }
+#endif
 
 int _String_FindTwoChars(const String *str, char ach, char bch)
 {
@@ -675,7 +728,7 @@ int _String_FindTwoChars(const String *str, char ach, char bch)
 	p++;
     }
 
-    return -1;
+    return kString_NotFound;
 }
 
 int _String_FindLastTwoChars(const String *str, char ach, char bch)
@@ -689,7 +742,7 @@ int _String_FindLastTwoChars(const String *str, char ach, char bch)
 	    return p - begin;
     }
 
-    return -1;
+    return kString_NotFound;
 }
 
 int String_FindChar(const String *str, char ch, bool sameCase)
@@ -705,7 +758,7 @@ int String_FindChar(const String *str, char ch, bool sameCase)
     const char *p = memchr(String_Chars(str), ch, String_Length(str));
 
     if (p == NULL)
-	return -1;
+	return kString_NotFound;
 
     return p - String_Chars(str);
 }
@@ -731,7 +784,7 @@ int String_FindLastChar(const String *str, char ch, bool sameCase)
 	    return p - begin;
     }
 
-    return -1;
+    return kString_NotFound;
 }
 
 int String_FindString(const String *str, const String *sub, bool sameCase)
@@ -746,7 +799,8 @@ int String_FindString(const String *str, const String *sub, bool sameCase)
     int offset = 0;
     int pos;
 
-    while ((pos = String_FindChar(&tmp, firstChar, sameCase)) != -1) {
+    while ((pos = String_FindChar(&tmp, firstChar, sameCase)) !=
+	   kString_NotFound) {
 	String_Adjust(&tmp, pos);
 	offset += pos;
 
@@ -758,10 +812,15 @@ int String_FindString(const String *str, const String *sub, bool sameCase)
 	String_Adjust(&tmp, 1);
     }
 
-    return -1;
+    return kString_NotFound;
 }
 
-inline int String_FindNewline(const String *str)
+bool String_FoundString(const String *str, const String *sub, bool sameCase)
+{
+    return String_FindString(str, sub, sameCase) != kString_NotFound;
+}
+
+static inline int String_FindNewline(const String *str)
 {
     return _String_FindTwoChars(str, '\r', '\n');
 }
@@ -955,7 +1014,7 @@ int Array_Count(const Array *array)
     return array->count;
 }
 
-inline void _Array_CheckBounds(const Array *array, int ix)
+static inline void _Array_CheckBounds(const Array *array, int ix)
 {
     if (ix < 0 || ix >= Array_Count(array)) {
 	Fatal(EX_UNAVAILABLE, "Out of bounds reference to array %#lx at %d",
@@ -963,7 +1022,7 @@ inline void _Array_CheckBounds(const Array *array, int ix)
     }
 }
 
-inline void *Array_GetAt(const Array *array, int ix)
+static inline void *Array_GetAt(const Array *array, int ix)
 {
     _Array_CheckBounds(array, ix);
     return array->items[ix];
@@ -1236,7 +1295,7 @@ bool Parse_UntilNewline(Parser *par, String **pResult)
 {
     int pos = String_FindNewline(&par->rest);
 
-    if (pos == -1) {
+    if (pos == kString_NotFound) {
 	if (pResult != NULL)
 	    *pResult = NULL;
 	return false;
@@ -1254,7 +1313,7 @@ bool Parse_UntilChar(Parser *par, char ch, bool sameCase, String **pResult)
 {
     int pos = String_FindChar(&par->rest, ch, sameCase);
 
-    if (pos == -1) {
+    if (pos == kString_NotFound) {
 	if (pResult != NULL)
 	    *pResult = NULL;
 	return false;
@@ -1280,7 +1339,7 @@ bool Parse_UntilString(Parser *par, const String *expect, bool sameCase,
 {
     int pos = String_FindString(&par->rest, expect, sameCase);
 
-    if (pos == -1) {
+    if (pos == kString_NotFound) {
 	if (pResult != NULL)
 	    *pResult = NULL;
 	return false;
@@ -1579,28 +1638,28 @@ void Stream_PrintF(Stream *output, const char *fmt, ...)
  **  String <-> Array Functions
  **/
 
-String *Array_Join(Array *array, const String *delim)
+String *Array_JoinTail(Array *array, const String *delim, int index)
 {
     int i, count = Array_Count(array);
-    int newLength = 0;
+    int delimLen = String_Length(delim);
+    int newLength = (count - index - 1) * delimLen;
 
-    if (count == 0)
+    if (count <= index)
 	return NULL;
 
-    for (i = 0; i < count; i++) {
+    for (i = index; i < count; i++) {
 	String *str = Array_GetAt(array, i);
 	newLength += String_Length(str);
     }
 
-    int delimLen = String_Length(delim);
-    String *newString = String_Alloc(newLength + count * delimLen);
+    String *newString = String_Alloc(newLength);
     char *newChars = (char *) String_Chars(newString);
 
-    for (i = 0; i < count; i++) {
+    for (i = index; i < count; i++) {
 	String *str = Array_GetAt(array, i);
 	int len = String_Length(str);
 
-	if (i > 0 && delimLen > 0) {
+	if (i > index && delimLen > 0) {
 	    memcpy(newChars, String_Chars(delim), delimLen);
 	    newChars += delimLen;
 	}
@@ -1609,6 +1668,11 @@ String *Array_Join(Array *array, const String *delim)
     }
 
     return newString;
+}
+
+String *Array_Join(Array *array, const String *delim)
+{
+    return Array_JoinTail(array, delim, 0);
 }
 
 Array *String_Split(const String *str, char separator, bool trim)
@@ -1682,7 +1746,7 @@ const String *kMonths[] = {
     NULL
 };
 
-// Returns NULL if none was found
+// Returns -1 if none was found
 //
 static int ParseKeyword(Parser *par, const String **keywords)
 {
@@ -2050,21 +2114,34 @@ bool Parse_Header(Parser *par, Header **phead)
 		Parser_MoveTo(par, pos);
 		Parser_Warn(par, "Encountered unexpected \"From \" line in "
 			    "headers {@%d}", Parser_Position(par));
+		Header_Free(head, false);
 		return false;
+	    }
+	    /* Or is it a ">From" line?
+	     */
+	    if (String_IsEqual(head->key, &Str_GTFromSpace, true)) {
+		// Yup, complain & accept it.
+		Parser_Warn(par, "Encountered unexpected \"%s\" line in "
+			    "headers {@%d}", 
+			    String_CString(head->key), Parser_Position(par));
+		break;
 	    }
 	}
 	if (gCheck && ch >= '\0' && ch <= ' ') {
 	    if (++warnCount < kCheck_MaxWarnCount)
 		Parser_Warn(par, "Illegal character %s in message "
 			    "headers%s {@%d}", Char_QuotedCString(ch), 
-			    warnCount == kCheck_MaxWarnCount ? " (and more)":"",
+			    warnCount == kCheck_MaxWarnCount ?
+				" (and more)" : "",
 			    Parser_Position(par));
 	}
     }
-    Parse_StringEnd(par, head->key);
-    // Backup over the colon
-    head->key->len--;
-    String_TrimSpaces(head->key);
+    // Backup over the colon (unless it's ">From ")
+    if (ch == ':') {
+	Parse_StringEnd(par, head->key);
+	head->key->len--;
+	String_TrimSpaces(head->key);
+    }
 
     // Parse header value
     //
@@ -2125,11 +2202,59 @@ void Stream_WriteHeaders(Stream *output, Headers *headers)
 	    Stream_WriteString(output, head->line);
 	} else {
 	    Stream_WriteString(output, head->key);
-	    Stream_WriteChars(output, ": ", 2);
+	    if (!String_IsEqual(head->key, &Str_GTFromSpace, true))
+		Stream_WriteChars(output, ": ", 2);
 	    Stream_WriteString(output, head->value);
 	    Stream_WriteNewline(output);
 	}
     }
+}
+
+String *Message_SynthesizeMessageID(Message *msg)
+{
+    const String *idHeaderKeys[] = {
+	&Str_Cc, &Str_Date, &Str_From, &Str_Sender, &Str_Subject, &Str_To, NULL
+    };
+    md5_state_t md5state;
+    md5_byte_t md5digest[16];
+    String *result = String_Alloc(1 + sizeof(md5digest) * 2 +
+				  strlen(kSyntheticMessageIDSuffix) + 1);
+    Header *header;
+
+    md5_init(&md5state);
+
+    /* Compute the message ID based on the MD5 checksum for a set of
+     * identifying headers + the message body.
+     */
+
+    for (header = msg->headers->root; header != NULL; header = header->next) {
+	const String **pkey;
+
+	for (pkey = idHeaderKeys; *pkey != NULL; pkey++) {
+	    if (String_IsEqual(header->key, *pkey, true)) {
+		// XXX: Should decode the header value before using it
+		md5_append(&md5state,
+			   (md5_byte_t *) String_Chars(header->value),
+			   String_Length(header->line));
+		break;
+	    }
+	}
+    }
+
+    md5_append(&md5state, (md5_byte_t *) String_Chars(msg->body),
+	       String_Length(msg->body));
+
+    md5_finish(&md5state, md5digest);
+
+    sprintf((char *) String_Chars(result),
+	    "<%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x"
+	    kSyntheticMessageIDSuffix ">",
+	    md5digest[ 0], md5digest[ 1], md5digest[ 2], md5digest[ 3],
+	    md5digest[ 4], md5digest[ 5], md5digest[ 6], md5digest[ 7],
+	    md5digest[ 8], md5digest[ 9], md5digest[10], md5digest[11],
+	    md5digest[12], md5digest[13], md5digest[14], md5digest[15]);
+
+    return result;
 }
 
 /**
@@ -2268,45 +2393,81 @@ void Message_SetDeleted(Message *msg, bool flag)
 static bool ParseFromSpaceHelper(Parser *par, String **pEnvSender,
 				 struct tm *pEnvTime)
 {
-    int pos = Parser_Position(par);
+    int savedpos = Parser_Position(par);
 
-    // Got "From "?
+
+    if (pEnvSender != NULL)
+	*pEnvSender = NULL;
+
+    // A typical "FromSpace" line will look like this:
     //
+    //   "From" <space> <sender> <space> <date> <newline>
+    //
+    // with only once space for each <space>, but unfortunately,
+    // the world is not always so simple. Sometimes, there are
+    // multiple spaces where there should only be one, sometimes
+    // the <date> may be suffixed by "remote from <site" like in
+    // the old uucp days, and sometimes the <sender> may contain
+    // a whole RFC822 address phrase with comments and spaces
+    // (I'm looking at you, YahooGroups!)
+    //
+    // In order to deal with this mess, we will make two attempts
+    // at parsing the FromSpace line: One that accepts a simple
+    // address as <sender>, but garbage after the <date>, and one
+    // that accepts a long complicated <sender>, but wants a
+    // <newline> directly after the <date>.
+
+    // Look for "From " first of all
+
     if (!Parse_ConstString(par, &Str_FromSpace, true, NULL))
 	return false;
 
-    // There shouldn't be more than one space, but just in case...
-    //
-    (void) Parse_Spaces(par, NULL);
+    int senderpos = Parser_Position(par);
 
-    // Parse envelope sender
+    // Try <sender> <date>...<newline>
     //
-    if (!Parse_UntilSpace(par, pEnvSender)) {
-	Parser_MoveTo(par, pos);
+    if (Parse_UntilSpace(par, pEnvSender) &&
+	Parse_Spaces(par, NULL) &&
+	Parse_CTime(par, pEnvTime) &&
+	Parse_UntilNewline(par, NULL) &&
+	Parse_Newline(par, NULL))
+	return true;
+
+    String_FreeP(pEnvSender);
+    Parser_MoveTo(par, senderpos);
+
+    // Try <sender-with-comments> <date><newline>
+    //
+    // First look for newline.
+    //
+    if (!Parse_UntilNewline(par, NULL)) {
+	Parser_MoveTo(par, savedpos);
 	return false;
     }
 
-    // There still shouldn't be more than one space, but just in case...
+    // The date is always 24 chars long.
     //
-    (void) Parse_Spaces(par, NULL);
+    int nlpos = Parser_Position(par);
+    Parser_MoveTo(par, nlpos - 24);
 
-    // Parse envelope date in ctime format
+    // Try get the date
     //
     if (!Parse_CTime(par, pEnvTime)) {
-	String_FreeP(pEnvSender);
-	Parser_MoveTo(par, pos);
+	Parser_MoveTo(par, savedpos);
 	return false;
     }
 
-    // Allow possible "garbage" to come after the timestamp,
-    // e.g. "remote from foobar" like in the old uucp days.
+    // Finally, the grab the sender
+    //
+    if (pEnvSender != NULL) {
+	Parser_MoveTo(par, senderpos);
+	Parse_StringStart(par, pEnvSender);
+	Parser_MoveTo(par, nlpos - 24);
+	Parse_StringEnd(par, *pEnvSender);
+    }
 
-    (void) Parse_UntilNewline(par, NULL);
-    if (!Parse_Newline(par, NULL)) {
-	String_FreeP(pEnvSender);
-	Parser_MoveTo(par, pos);
-	return false;
-    }	
+    Parser_MoveTo(par, nlpos);
+    Parse_Newline(par, NULL);
 
     return true;
 }
@@ -2329,6 +2490,31 @@ bool Parse_FromSpaceLine(Parser *par, String **pLine, String **pEnvSender,
     return success;
 }
 
+// Return true and update the parser to point to the next "From " line given
+// that it is preceeded by the required number of newlines. Otherwise, return
+// false and don't move the parser position.
+//
+bool Parse_UntilFromSpace(Parser *par, int newlines)
+{
+    int savedPos = Parser_Position(par);
+
+    while (Parse_UntilString(par, &Str_FromSpace, true, NULL)) {
+	int i, pos = Parser_Position(par);
+
+	for (i = 0; i < newlines && Parse_BackupNewline(par); i++);
+	// We succeeded if we found enough newlines before the From_
+	// line *and* we didn't go back before our starting position.
+	if (i == newlines && Parser_Position(par) > savedPos)
+	    return true;
+
+	Parser_MoveTo(par, pos + String_Length(&Str_FromSpace));
+    }
+
+    Parser_MoveTo(par, savedPos);
+
+    return false;
+}
+
 void WarnContentLength(Message *msg, int contLen, int bodyLen)
 {
     int delta = abs(contLen - bodyLen);
@@ -2341,7 +2527,7 @@ void WarnContentLength(Message *msg, int contLen, int bodyLen)
 	Warn("Message %s: Oversized, %d bytes too many",
 	     String_CString(msg->tag), bodyLen - contLen);
 
-    } else if (gStringent) {
+    } else if (gStrict) {
 	Warn("Message %s: Incorrect Content-Length: %d; using %d",
 	     String_CString(msg->tag), contLen, bodyLen);
     }
@@ -2352,8 +2538,7 @@ int ProcessDovecotFromSpaceBugBody(Parser *par, int endPos,
 				   Array *bodyParts)
 {
     int xHeadSpace = 0;
-    String *part;
-
+    String *part = NULL;
 
     if (bodyParts != NULL)
 	Parse_StringStart(par, &part);
@@ -2635,7 +2820,7 @@ void MoveToEndOfMessage(Parser *par, Message *msg)
 		int lastPos = -1;
 		int fromPos = -1;
 
-		while (Parse_UntilString(par, &Str_NL2FromSpace, true, NULL)) {
+		while (Parse_UntilFromSpace(par, 2)) {
 		    // Remember the pos between the newlines -- that's
 		    // the proper (tentative) end of the message.
 		    //
@@ -2676,7 +2861,7 @@ void MoveToEndOfMessage(Parser *par, Message *msg)
 
 		int fromPos = -1;
 
-		while (Parse_UntilString(par, &Str_NL2FromSpace, true, NULL)) {
+		while (Parse_UntilFromSpace(par, 2)) {
 		    Parse_Newline(par, NULL);
 		    fromPos = Parser_Position(par);
 		    Parse_Newline(par, NULL);
@@ -2756,7 +2941,7 @@ void MoveToEndOfMessage(Parser *par, Message *msg)
 	    Parser_MoveTo(par, pos);
 	    return;
 	}
-    } while (Parse_UntilString(par, &Str_NLFromSpace, true, NULL) &&
+    } while (Parse_UntilFromSpace(par, 1) &&
 	     (pos = Parser_Position(par)) &&
 	     Parse_Newline(par, NULL));
 #else
@@ -2770,7 +2955,7 @@ void MoveToEndOfMessage(Parser *par, Message *msg)
      */
     Parse_BackupNewline(par);
     
-    while (Parse_UntilString(par, &Str_NLFromSpace, true, NULL)) {
+    while (Parse_UntilFromSpace(par, 1)) {
         int pos = Parser_Position(par);
 
 	(void) Parse_Newline(par, NULL);
@@ -2821,6 +3006,9 @@ bool Parse_Message(Parser *par, Mailbox *mbox, bool useAllData, Message **pMsg)
     if (!Parse_FromSpaceLine(par, &msg->envelope, &msg->envSender,
 			     &msg->envDate)) {
 	Parser_Warn(par, "Could not find a valid \"From \" line for message %s",
+		    String_CString(msg->tag));
+    } else if (String_IsEmpty(msg->envSender)) {
+	Parser_Warn(par, "Empty envelope sender for message %s",
 		    String_CString(msg->tag));
     }
 
@@ -2895,7 +3083,7 @@ String *Mailbox_Name(Mailbox *mbox)
     if (mbox->name == NULL && mbox->source != NULL) {
 	int pos = String_FindLastChar(mbox->source, '/', true);
 
-	if (pos++ == -1)
+	if (pos++ == kString_NotFound)
 	    pos = 0;
 
 	mbox->name =
@@ -3376,7 +3564,6 @@ int User_AskChoice(const char *question, const char *choices, char def)
 	if (ch == '\n')
 	    break;
 
-	ch = tolower(ch);
 	if (strchr(choices, ch) != NULL)
 	    answer = ch;
 
@@ -3427,26 +3614,26 @@ void MessageSet_Free(MessageSet *set)
 // Parse a message set specification of the form:
 //   <min>['-'[<max>]][','...] | '*'
 //
-bool Parse_MessageSet(Parser *par, MessageSet **pSet, int maxMax)
+bool Parse_MessageSet(Parser *par, MessageSet **pSet, int last)
 {
     int min, max;
     MessageSet *link = NULL;
 
     if (Parse_ConstChar(par, '*', true, NULL)) {
 	min = 1;
-	max = maxMax;
+	max = last;
 
     } else {
 	if (!Parse_Integer(par, &min))
 	return false;
 	if (Parse_ConstChar(par, '-', true, NULL)) {
 	    if (!Parse_Integer(par, &max))
-		max = maxMax;
+		max = last;
 	} else {
 	    max = min;
 	}
 	if (Parse_ConstChar(par, ',', true, NULL)) {
-	    (void) Parse_MessageSet(par, &link, maxMax);
+	    (void) Parse_MessageSet(par, &link, last);
 	}
     }
 
@@ -3570,48 +3757,47 @@ static int FindIllegalChar(String *str, bool controlOK, bool eightBitOK)
 	    return i;
     }
 
-    return -1;
+    return kString_NotFound;
 }
 
 typedef struct {
     bool repair;		// Are we repairing?
-    bool all;			// Should we repair everything w/o asking?
+    char autoChoice;		// Should this choice apply without asking?
     bool quit;			// Have the user told us to quit repairing?
 } RepairState;
 
 void InitRepairState(RepairState *state, bool repair)
 {
     state->repair = repair;
-    state->all = !gInteractive;
+    state->autoChoice = gInteractive ? '\0' : 'y';
     state->quit = false;
 }
 
 bool IsRepairingAll(RepairState *state)
 {
-    return state->repair && state->all;
+    return state->repair && state->autoChoice == 'y';
 }
 
 bool ShouldRepair(RepairState *state)
 {
-    int choice = 'y';
+    int choice = state->autoChoice;
 
     if (!state->repair)
 	return false;
 
-    if (!state->all)
-	choice = User_AskChoice(" Repair?", "ynq!", 'y');
+    if (choice == '\0')
+	choice = User_AskChoice(" Repair [ynq]?", "ynYNq", 'y');
 
-    if (choice == '!') {
-	state->all = true;
-	choice = 'y';
-    }
+    // An uppercase answer will apply to all remaining questions
+    if (isupper(choice))
+	choice = state->autoChoice = tolower(choice);
 
     state->quit = (choice == 'q');
 
     return choice == 'y';
 }
 
-void CheckMailbox(Mailbox *mbox, bool stringent, bool repair)
+void CheckMailbox(Mailbox *mbox, bool strict, bool repair)
 {
     Message *msg;
     RepairState state;
@@ -3631,7 +3817,9 @@ void CheckMailbox(Mailbox *mbox, bool stringent, bool repair)
 
 	int bodyLength = Message_BodyLength(msg);
 
-	if (cllen != bodyLength) {
+	// Always care about incorrect Content-Lengths, but only
+	// care about missing ones if we're being strict.
+	if (cllen != bodyLength && (value != NULL || strict)) {
 	    // Got the Dovecot "From " bug?
 	    //
 	    if (msg->dovecotFromSpaceBug != kDFSB_None) {
@@ -3644,7 +3832,8 @@ void CheckMailbox(Mailbox *mbox, bool stringent, bool repair)
 		    RepairDovecotFromSpaceBugBody(msg);
 		    // Repairing the message will change it's length
 		    bodyLength = Message_BodyLength(msg);
-		}
+		} else if (state.quit)
+		    break;
 
 	    } else {
 		if (value == NULL)
@@ -3657,20 +3846,55 @@ void CheckMailbox(Mailbox *mbox, bool stringent, bool repair)
 			 String_PrettyCString(value), bodyLength,
 			 IsRepairingAll(&state) ? " (repairing)" : "");
 
-		if (!ShouldRepair(&state))
-		    continue;
-
-		Header_Set(msg->headers, &Str_ContentLength,
-			   String_PrintF("%d", bodyLength));
+		if (ShouldRepair(&state))
+		    Header_Set(msg->headers, &Str_ContentLength,
+			       String_PrintF("%d", bodyLength));
+		else if (state.quit)
+		    break;
 	    }
 	}
-	if (state.quit)
-	    break;
 
-	// Only stringent tests below
+	// Got Message-ID?
 	//
-	if (!stringent)
+	value = Header_Get(msg->headers, &Str_MessageID);
+	if (value == NULL || String_IsEmpty(value)) {
+	    source = &Str_XMessageID;
+	    value = Header_Get(msg->headers, source);
+
+	    if (value == NULL || String_IsEmpty(value)) {
+		String *synthID = Message_SynthesizeMessageID(msg);
+
+		Warn("Message %s: Missing Message-ID: header, %s with %s",
+		     String_CString(msg->tag),
+		     IsRepairingAll(&state) ? "replacing" : "could replace",
+		     String_CString(synthID));
+
+		if (ShouldRepair(&state))
+		    Header_Set(msg->headers, &Str_MessageID, synthID);
+		else if (state.quit)
+		    break;
+	    }
+	}
+
+	// Only strict tests below
+	//
+	if (!strict)
 	    continue;
+
+	// Got ">From " in headers?
+	//
+	value = Header_Get(msg->headers, &Str_GTFromSpace);
+	if (value != NULL) {
+	    Warn("Message %s: Bogus \">From \" line in the the headers:\n"
+		 " \">From %s\"%s",
+		 String_CString(msg->tag), String_CString(value),
+		 IsRepairingAll(&state) ? " (removing)" : "");
+
+	    if (ShouldRepair(&state))
+		Header_Delete(msg->headers, &Str_GTFromSpace, false);
+	    else if (state.quit)
+		break;
+	}
 
 	// Got From?
 	//
@@ -3707,13 +3931,12 @@ void CheckMailbox(Mailbox *mbox, bool stringent, bool repair)
 		if (ShouldRepair(&state)) {
 		    Header_Set(msg->headers, &Str_From, value);
 		    value = NULL;
-		}
+		} else if (state.quit)
+		    break;
 	    }
 
 	    String_Free(value);
 	}
-	if (state.quit)
-	    break;
 
 	// Got Date?
 	//
@@ -3732,7 +3955,7 @@ void CheckMailbox(Mailbox *mbox, bool stringent, bool repair)
 		String *received = Header_GetLastValue(msg->headers, source);
 		if (received != NULL) {
 		    int pos = String_FindChar(received, ';', true);
-		    if (pos != -1) {
+		    if (pos != kString_NotFound) {
 			Parser tmp;
 			Parser_Set(&tmp, received);
 			Parser_Move(&tmp, pos + 1);
@@ -3762,25 +3985,11 @@ void CheckMailbox(Mailbox *mbox, bool stringent, bool repair)
 		if (ShouldRepair(&state)) {
 		    Header_Set(msg->headers, &Str_Date, value);
 		    value = NULL;
-		}
+		} else if (state.quit)
+		    break;
 	    }
 
 	    String_Free(value);
-	}
-	if (state.quit)
-	    break;
-
-	// Got Message-ID?
-	//
-	value = Header_Get(msg->headers, &Str_MessageID);
-	if (value == NULL) {
-	    source = &Str_XMessageID;
-	    value = Header_Get(msg->headers, source);
-
-	    if (value == NULL) {
-		Warn("Message %s: Missing Message-ID: header",
-		     String_CString(msg->tag));
-	    }
 	}
 
 	// Make sure there's no (undeclared) binary data in headers or body
@@ -3839,7 +4048,7 @@ bool Message_Split(Message *msg, bool interactively)
     for (;;) {
 	String *line;
 
-	if (!Parse_UntilString(&parser, &Str_NL2FromSpace, true, NULL))
+	if (!Parse_UntilFromSpace(&parser, 2))
 	    break;
 
 	if (!Parse_Newline(&parser, NULL) || !Parse_Newline(&parser, NULL))
@@ -3852,7 +4061,7 @@ bool Message_Split(Message *msg, bool interactively)
 	    bool split = true;
 
 	    // Remove the newline from the string we parsed
-	    if (String_Length(line) > 0)
+	    if (!String_IsEmpty(line))
 		String_SetLength(line, String_Length(line) - 1);
 
 	    Note("Message %s: Found \"From \" line in body:\n %s",
@@ -3897,7 +4106,7 @@ bool Message_Split(Message *msg, bool interactively)
 }
 
 #if 0
-void CheckContentLengths(Message *msg, bool stringent, bool repair)
+void CheckContentLengths(Message *msg, bool strict, bool repair)
 {
     for (; msg != NULL; msg = msg->next) {
 	String *value = Header_Get(msg->headers, &Str_ContentLength);
@@ -3920,7 +4129,7 @@ void CheckContentLengths(Message *msg, bool stringent, bool repair)
 			   String_PrintF("%d", bodlen));
 
 	    } else {
-		if (stringent)
+		if (strict)
 		    Warn("Message %s: Missing Content-Length: header",
 			 String_CString(msg->tag));
 	    }
@@ -4209,16 +4418,21 @@ int IntLength(int num)
 void ListMessage(Stream *output, int num, int numWidth, Message *msg,
 		 int previewLines, int cur)
 {
+    // ' '<num:numWidth>': '<date:12>'  '<from>'  '<subject>'  '<size:6>
     String *sizstr = String_ByteSize(String_Length(msg->data));
+    int fromSubjectWidth = gPageWidth - 27 - numWidth;
+    int fromWidth = fromSubjectWidth * 2 / 5;
+    int subjectWidth = fromSubjectWidth - fromWidth;
 
     Stream_PrintF(output, "%c%*d%c ",
 		  num == cur ? '>' : ' ', numWidth, num,
 		  Message_IsDeleted(msg) ? 'D' : ':');
     PrintShortDate(output, Header_Get(msg->headers, &Str_Date));
-    Stream_PrintF(output, "  %-20.20s",
+    Stream_PrintF(output, "  %-*.*s", fromWidth, fromWidth,
 		  String_CString(String_Safe(Header_Get(msg->headers, &Str_From))));
     Stream_PrintF(output, "  %-*.*s",
-		  33 - numWidth, 33 - numWidth,
+		  //33 - numWidth, 33 - numWidth,
+		  subjectWidth, subjectWidth,
 		  String_CString(String_Safe(Header_Get(msg->headers, &Str_Subject))));
     Stream_PrintF(output, " %6s\n", String_CString(String_Safe(sizstr)));
 
@@ -4239,19 +4453,62 @@ void ListMessage(Stream *output, int num, int numWidth, Message *msg,
     }
 }
 
-void ListMailbox(Stream *output, Mailbox *mbox, int num, int count)
+void ListMailbox(Stream *output, Mailbox *mbox, int cur, int count)
 {
+    // A negative count means all messages
+    if (count < 0)
+	count = Mailbox_Count(mbox) - cur - 1;
+
     // Adjust to even page boundary with zero offset
-    //int start = ((num - 1) / count) * count;
-    int start = num;
-    int i = 0;
+    //int start = ((cur - 1) / count) * count;
+    int start = cur;
+    int i = 1;
     int digits = IntLength(start + count + 1 - 1);
     Message *msg;
 
     for (msg = Mailbox_Root(mbox); msg != NULL && i < start; msg = msg->next, i++);
 
     for (; msg != NULL && i < start + count; msg = msg->next, i++) {
-	ListMessage(output, i + 1, digits, msg, 0, num);
+	ListMessage(output, i, digits, msg, 0, cur);
+    }
+}
+
+#define kSearchBody		((String *) -1)
+
+// Key can be NULL which will make us try to find the string everywhere
+void FindMessages(Stream *output, Mailbox *mbox, const String *key,
+		  const String *string)
+{
+    Message *msg;
+    int numWidth = IntLength(mbox->count);
+
+    if (String_IsEqual(key, &Str_Body, false))
+	key = kSearchBody;
+
+    for (msg = Mailbox_Root(mbox); msg != NULL; msg = msg->next) {
+	bool found = false;
+	Header *head;
+
+	if (key == NULL) {
+	    for (head = msg->headers->root; head != NULL; head = head->next) {
+		if (String_FoundString(head->value, string, false)) {
+		    found = true;
+		    break;
+		}
+	    }
+	} else if (key != kSearchBody) {
+	    const String *value = Header_Get(msg->headers, key);
+	    if (value != NULL)
+		found = String_FoundString(value, string, false);
+	}
+
+	if (!found && (key == NULL || key == kSearchBody)) {
+	    found = String_FoundString(msg->body, string, false);
+	}
+
+	if (found) {
+	    ListMessage(output, msg->num, numWidth, msg, 0, -1);
+	}
     }
 }
 
@@ -4302,7 +4559,7 @@ void DiffMessages(Message *a, Message *b)
     Stream_Free(tmpb, true);
 }
 
-int ChooseMessageToDelete(Message *a, Message *b)
+int ChooseMessageToDelete(Message *a, Message *b, char *autoChoice)
 {
     Stream_PrintF(gStdOut, "\n");
 
@@ -4312,18 +4569,29 @@ int ChooseMessageToDelete(Message *a, Message *b)
     Stream_WriteNewline(gStdOut);
 
     for (;;) {
-	switch (User_AskChoice("Please choose which message to delete "
-			       "(or b(oth), d(iff), or n(either) (or q(uit))):",
-			       "12bdenx", 'n')) {
+	char choice = *autoChoice;
+
+	if (choice == '\0')
+	    choice = User_AskChoice("Please choose which message to delete "
+				    "(or b(oth), d(iff), or n(either)):",
+				    "12bnBNdq", 'n');
+
+	if (isupper(choice))
+	    choice = *autoChoice = tolower(choice);
+
+	switch (choice) {
 	  case '1':
+	    Note("Deleting the first message]");
 	    Message_SetDeleted(a, true);
 	    return 1;
 
 	  case '2':
+	    Note("Deleting the second message]");
 	    Message_SetDeleted(b, true);
 	    return 1;
 
 	  case 'b':
+	    Note("Deleting both messages]");
 	    Message_SetDeleted(a, true);
 	    Message_SetDeleted(b, true);
 	    return 2;
@@ -4332,14 +4600,12 @@ int ChooseMessageToDelete(Message *a, Message *b)
 	    DiffMessages(a, b);
 	    break;
 
-	  case 'e':
-	  case 'q':
-	  case 'x':
-	    Stream_PrintF(gStdOut, "Exiting...\n");
-	    return -1;
-
-	  default:
+	  case 'n':
+	    Note("Deleting no messages]");
 	    return 0;
+
+	  case 'q':
+	    return -1;
 	}
     }
 }
@@ -4348,8 +4614,9 @@ void UniqueMailbox(Mailbox *mbox)
 {
     Array *mary = SplitMessages(mbox, NULL);
     int i, count = Array_Count(mary);
-    int dups = 0;
+    int allDups = 0;
     Message *m, *n;
+    char autoChoice = '\0';
 
     SortMessages(mary);
 
@@ -4360,8 +4627,13 @@ void UniqueMailbox(Mailbox *mbox)
 	if (!Message_IsDeleted(m) && !Message_IsDeleted(n) &&
 	    m->cachedID != NULL && n->cachedID != NULL &&
 	    String_IsEqual(m->cachedID, n->cachedID, true)) {
-	    static String const *checkKeys[] =
-		{&Str_From, &Str_To, &Str_Subject, &Str_Date, NULL};
+	    static String const *checkKeys[] = {
+		&Str_From, &Str_To, &Str_Cc, &Str_Bcc, &Str_Subject, &Str_Date,
+		&Str_ResentFrom, &Str_ResentTo, &Str_ResentCc, &Str_ResentBcc,
+		&Str_ResentSubject, &Str_ResentDate, &Str_ResentMessageID,
+		&Str_XFrom, &Str_XTo, &Str_Xcc, &Str_XSubject, &Str_XDate,
+		NULL
+	    };
 	    const String **ss;
 	    bool same = true;
 
@@ -4399,20 +4671,20 @@ void UniqueMailbox(Mailbox *mbox)
 		     String_CString(n->tag),
 		     String_PrettyCString(m->cachedID)); 
 		Message_SetDeleted(n, true);
-		dups++;
+		allDups++;
 
 	    } else if (gInteractive) {
-		int ret = ChooseMessageToDelete(m, n);
-		if (ret < 0)
+		int dups = ChooseMessageToDelete(m, n, &autoChoice);
+		if (dups < 0)
 		    break;
-		dups += ret;
+		allDups += dups;
 	    }
 	}
     }
 
     Note("%s %d duplicate%s",
-	 dups == 0 ? "Found" : "Deleted",
-	 dups, dups == 1 ? "" : "s");
+	 allDups == 0 ? "Found" : "Deleted",
+	 allDups, allDups == 1 ? "" : "s");
 
     Array_Free(mary);
 }
@@ -4426,20 +4698,23 @@ typedef enum {
     kCmd_Check,
     kCmd_Delete,
     kCmd_DeleteAndShowNext,
+    kCmd_Diff,
     kCmd_Edit,
     kCmd_Exit,
+    kCmd_Find,
     kCmd_Help,
     kCmd_Join,
     kCmd_List,
     kCmd_ListNext,
     kCmd_ListPrevious,
     kCmd_Repair,
+    kCmd_Run,
     kCmd_Save,
     kCmd_Show,
     kCmd_ShowPrevious,
     kCmd_ShowNext,
     kCmd_Split,
-    kCmd_Stringent,
+    kCmd_Strict,
     kCmd_Undelete,
     kCmd_Unique,
     kCmd_Write,
@@ -4470,16 +4745,20 @@ CommandTable kCommandTable[] = {
      "go to the next message and display it"},
     {"-",	NULL,		kCmd_ShowPrevious,
      "go to the previous message and display it"},
-    {"check",	"[stringent]",	kCmd_Check,
+    {"check",	"[strict]",	kCmd_Check,
      "check the mailbox' internal consistency"},
     {"delete",	"[<msgs>]",	kCmd_Delete,
      "mark one or more messages as deleted"},
+    {"diff",	"<msg1> <msg2>", kCmd_Diff,
+     "compare two messages and show the differences"},
     {"dp",	NULL,		kCmd_DeleteAndShowNext,
      "delete the current message, then show the next message"},
     {"edit",	"[<msg>]",	kCmd_Edit,
      "edit the specified message using a file-based editor"},
     {"exit",	NULL,		kCmd_WriteAndExit,
      "save any changes, then leave the mailbox"},
+    {"find",	"[<header>:] <string>",	kCmd_Find,
+     "find any messages containing the given string"},
     {"headers",	"[<msg>]",	kCmd_List,
      "list a page full of message descriptions"},
     {"list",	"[<msg>]",	kCmd_List,
@@ -4498,14 +4777,16 @@ CommandTable kCommandTable[] = {
      "display the contents of the given message(s)"},
     {"quit",	NULL,		kCmd_Exit,
      "leave the mailbox without saving any changes"},
-    {"repair",	"[stringent]",	kCmd_Repair,
+    {"repair",	"[strict]",	kCmd_Repair,
      "check the mailbox' internal state and repair if needed"},
+    {"run",	"[<msgs>] <cmd> [<args>]", kCmd_Run,
+     "execute the command repeatedly with each of the messages as input"},
     {"save",	"[<msgs>] <file>", kCmd_Save,
      "save the messages to the given file"},
     {"split",	"[<msgs>]",	kCmd_Split,
      "look for 'From ' lines in the messages and split them"},
-    {"stringent",	"[<on-or-off>]", kCmd_Stringent,
-     "set/show 'stringent' mode when checking mailboxes"},
+    {"strict", "[<on/off>]", kCmd_Strict,
+     "set/show 'strict' mode when checking mailboxes"},
     {"undelete", "[<msgs>]",	kCmd_Undelete,
      "undelete one or more messages"},
     {"unique",	NULL,		kCmd_Unique,
@@ -4546,15 +4827,13 @@ bool NoNextArg(int *pIndex, Array *args)
 
 int String_ToMessageNumber(const String *str, Mailbox *mbox)
 {
-    const String *dollar = String_FromCString("$", false);
-
-    if (String_IsEqual(str, dollar, false))
+    if (String_IsEqual(str, &Str_Dollar, true))
 	return Mailbox_Count(mbox);
 
     return String_ToInteger(str, -1);
 }
 
-MessageSet *MessageSetArg(String *arg, int maxMax)
+MessageSet *MessageSetArg(const String *arg, int last)
 {
     Parser parser;
     MessageSet *set = NULL;
@@ -4563,8 +4842,7 @@ MessageSet *MessageSetArg(String *arg, int maxMax)
 	return NULL;
 
     Parser_Set(&parser, arg);
-    if (!Parse_MessageSet(&parser, &set, maxMax) ||
-	!Parser_AtEnd(&parser)) {
+    if (!Parse_MessageSet(&parser, &set, last) || !Parser_AtEnd(&parser)) {
 	Error("Malformed message set: %s", String_CString(arg));
 	MessageSet_Free(set);
 	return NULL;
@@ -4631,11 +4909,12 @@ bool TrueString(const String *str, bool def)
 
 Message *GetMessageByNumber(Mailbox *mbox, int cur)
 {
-    Message *msg;
+    Message *msg = NULL;
     int i;
 
-    for (msg = Mailbox_Root(mbox), i = 1; msg != NULL && i < cur;
-	 msg = msg->next, i++);
+    if (cur > 0)
+	for (msg = Mailbox_Root(mbox), i = 1; msg != NULL && i < cur;
+	     msg = msg->next, i++);
 
     if (msg == NULL)
 	Error("Message %d does not exist", cur);
@@ -4698,9 +4977,9 @@ void ShowHelp(Stream *output, String *cmd)
 
 	for (ct = kCommandTable; ct->name != NULL; ct++) {
 	    if (isAll || String_IsEqual(cmd, ct->name, false)) {
-	    int width = 1 + String_Length(ct->name) + 1 + 1;
-	    if (ct->cargs != NULL)
-		width += strlen(ct->cargs);
+		int width = 1 + String_Length(ct->name) + 1 + 1;
+		if (ct->cargs != NULL)
+		    width += strlen(ct->cargs);
 
 		Stream_PrintF(output, " %s %s %*s-- %s\n",
 			      ct->cname, ct->cargs != NULL ? ct->cargs : "",
@@ -4729,13 +5008,45 @@ char *CompleteCommand(const char *prefix, int state)
 }
 #endif
 
+bool RunCommand(Message *msg, int index, Array *args)
+{
+    // XXX: Should be more efficient
+    String *command = Array_JoinTail(args, &Str_Space, index);
+
+    FILE *file = popen(String_CString(command), "w");
+
+    if (file == NULL) {
+	perror(String_CString(command));
+	String_Free(command);
+	return false;
+    }
+
+    Stream *stream =
+	Stream_New(file, String_Clone(Array_GetAt(args, index)), false);
+
+    Stream_WriteHeaders(stream, msg->headers);
+    Stream_WriteNewline(stream);
+    Stream_WriteString(stream, Message_Body(msg));
+
+    Stream_Free(stream, false);
+
+    if (pclose(file) != 0) {
+	perror(String_CString(command));
+	String_Free(command);
+	return false;
+    }
+
+    String_Free(command);
+    return true;
+}
+
 void RunLoop(Mailbox *mbox, Array *commands)
 {
     jmp_buf reentry;
     int msgCount;
     int cmdCount = Array_Count(commands);
     const String *cmdLine;
-    int cur = 0;
+    int cur = 1;
     int ci = 0;
     bool done = false;
     bool success;
@@ -4766,6 +5077,7 @@ void RunLoop(Mailbox *mbox, Array *commands)
 	//
 	int argi = 0;
 	const String *arg;
+	String *str;
 	CommandTable *ct;
 	Command cmd = kCmd_None;
 	MessageSet *set = NULL;
@@ -4863,6 +5175,22 @@ void RunLoop(Mailbox *mbox, Array *commands)
 	    }
 	    break;
 
+	  case kCmd_Diff: {
+	      arg = NextArg(&argi, args, true);
+	      if (arg == NULL) break;
+	      Message *msg1 =
+		  GetMessageByNumber(mbox, String_ToMessageNumber(arg, mbox));
+	      if (msg1 == NULL) break;
+	      arg = NextArg(&argi, args, true);
+	      if (arg == NULL) break;
+	      Message *msg2 =
+		  GetMessageByNumber(mbox, String_ToMessageNumber(arg, mbox));
+	      if (msg2 == NULL) break;
+
+	      DiffMessages(msg1, msg2);
+	      break;
+	  }
+
 	  case kCmd_List:
 	    arg = NextArg(&argi, args, false);
 	    if (String_IsEqual(arg, &Str_Minus, true))
@@ -4897,30 +5225,46 @@ void RunLoop(Mailbox *mbox, Array *commands)
 	    ListMailbox(gStdOut, mbox, cur, gPageHeight - 1);
 	    break;
 
-	  case kCmd_Stringent:
+	  case kCmd_Find:
+	    // Args are [<header>':'] <string>...
+	    arg = NextArg(&argi, args, true);
+	    if (String_HasSuffix(arg, &Str_Colon, true)) {
+		arg = String_Sub(arg, 0, String_Length(arg) - 1);
+	    } else {
+		arg = NULL;
+		argi--;
+	    }
+	    str = Array_JoinTail(args, &Str_Space, argi);
+	    FindMessages(gStdOut, mbox, arg, str);
+	    String_Free((String *) arg);
+	    String_Free(str);
+	    break;
+
+	  case kCmd_Strict:
 	    arg = NextArg(&argi, args, false);
 	    if (!NoNextArg(&argi, args))
 		break;
-	    gStringent = TrueString(arg, !gStringent);
-	    Note("Stringent checking mode is turned %s", gStringent ? "on" : "off");
+	    gStrict = TrueString(arg, !gStrict);
+	    Note("Strict checking mode is turned %s",
+		 gStrict ? "on" : "off");
 	    break;
 
 	  case kCmd_Check:
 	    arg = NextArg(&argi, args, false);
 	    if (!NoNextArg(&argi, args))
 		break;
-	    if (String_HasPrefix(arg, &Str_Stringent, false))
+	    if (arg != NULL && String_HasPrefix(&Str_Strict, arg, false))
 		arg = &Str_True;
-	    CheckMailbox(mbox, TrueString(arg, gStringent), false);
+	    CheckMailbox(mbox, TrueString(arg, gStrict), false);
 	    break;
 
 	  case kCmd_Repair:
 	    arg = NextArg(&argi, args, false);
 	    if (!NoNextArg(&argi, args))
 		break;
-	    if (String_HasPrefix(arg, &Str_Stringent, false))
+	    if (arg != NULL && String_HasPrefix(&Str_Strict, arg, false))
 		arg = &Str_True;
-	    CheckMailbox(mbox, TrueString(arg, gStringent), true);
+	    CheckMailbox(mbox, TrueString(arg, gStrict), true);
 	    break;
 
 	  case kCmd_Unique:
@@ -4983,6 +5327,28 @@ void RunLoop(Mailbox *mbox, Array *commands)
 	    if (msg != NULL) {
 		EditMessage(msg);
 		cur = num;
+	    }
+	    break;
+
+	  case kCmd_Run:
+	    // Do we have a message set arg?
+	    arg = NextArg(&argi, args, true);
+	    if (Char_IsDigit(String_CharAt(arg, 0))) {
+		set = MessageSetArg(arg, msgCount);
+	    } else {
+		argi--;
+		set = MessageSet_Make(cur, cur, NULL);
+	    }
+
+	    // Make sure that we have a command
+	    NextArg(&argi, args, true);
+	    argi--;
+
+	    for (num = MessageSet_First(set); num != -1;
+		 num = MessageSet_Next(set, num)) {
+		msg = GetMessageByNumber(mbox, num);
+		if (msg != NULL && !RunCommand(msg, argi, args))
+		    break;
 	    }
 	    break;
 
@@ -5120,7 +5486,7 @@ void Usage(const char *pname, bool help)
 		"  -o <file> \tconcatenate messages into <file>\n"
 		"  -q \t\tbe quiet and don't report warnings or notices\n"
 		"  -r \t\trepair the given mailboxes\n"
-		"  -s \t\tbe stringent and report more indiscretions than otherwise\n"
+		"  -s \t\tbe strict and report more indiscretions than otherwise\n"
 		"  -u \t\tunique messages in each mailbox by removing duplicates\n"
 		"  -v \t\tbe verbose and print out more progress information\n"
 		"  -C \t\tshow a few lines of context around parse errors\n"
@@ -5153,10 +5519,7 @@ void Usage(const char *pname, bool help)
 
 void ShowVersion(void)
 {
-    int rev = -1;
-
-    sscanf(gRevision, "$Rev: %d", &rev);
-    printf("%s (rev %d)\n%s\n", gVersion, rev, gCopyright);
+    printf("%s (rev %d)\n%s\n", gVersion, kRevision, gCopyright);
 }
 
 String *NextMainArg(int *pAC, int argc, char **argv)
@@ -5289,16 +5652,17 @@ int main(int argc, char **argv)
 		    break;
 		  case 'h': Usage(argv[0], true); break;
 		  case 'i': gInteractive = true; break;
-		    //case 'l': gAddContentLength = true; break;
+		  case 'l': Array_Append(commands, &Str_List); break;
 		  case 'n': gDryRun = true; break;
 		  case 'o': outFile = NextMainArg(&ac, argc, argv); break;
 		  case 'q': gQuiet = true; break;
 		  case 'r': Array_Append(commands, &Str_Repair); break;
-		  case 's': gStringent = true; break;
+		  case 's': gStrict = true; break;
 		  case 'u': Array_Append(commands, &Str_Unique); break;
 		  case 'v': gVerbose = true; break;
 		  case 'w': gAutoWrite= true; break;
 		  case 'C': gShowContext = true; break;
+		    //case 'L': gWantContentLength = true; break;
 		  case 'N': gMap = false; break;
 		  case 'V': ShowVersion(); Exit(0); break;
 		  default:
@@ -5307,6 +5671,21 @@ int main(int argc, char **argv)
 	    }
 	}
     }
+
+    /* Figure out the terminal window size
+     */
+    struct winsize ws;
+
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) != -1) {
+	if (ws.ws_col > 0)
+	    gPageWidth = ws.ws_col;
+	if (ws.ws_row > 0)
+	    gPageHeight = ws.ws_row;
+    }
+
+    // There's o height limit if we're not interactive
+    if (!gInteractive)
+	gPageHeight = -1;
 
     if (outFile != NULL && !gDryRun) {
 	output = Stream_Open(outFile, true, true);

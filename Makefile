@@ -1,7 +1,7 @@
 #
 #	Makefile for mfck
 #
-#	Copyright (c) 2008-2010 by Lennart Lovstrand <mfck@lenlolabs.com>
+#	Copyright (c) 2008-2017 by Lennart Lovstrand <mfck@lenlolabs.com>
 #
 #	Add -DUSE_READLINE to the CFLAGS and -lreadline to LOADLIBES if you
 #	have the readline library available.
@@ -10,20 +10,26 @@
 #	It's experimental and the code should run fine without it.
 #
 
-OPT=		-O
+#OPT=		-O3
 CFLAGS=		-g $(OPT) -Wall -DDEBUG -DUSE_READLINE # -DUSE_GC
 LOADLIBES=	-lreadline # -lgc
 
 TARGET=		mfck
 DESTBIN=	/usr/local/bin
 
-$(TARGET):
+$(TARGET):	mfck.o md5.o
+	$(CC) -o $(TARGET) mfck.o md5.o $(LOADLIBES)
+
+mfck.c:		vers.h
+
+vers.h:		.git/index
+	echo "#define kRevision $$(git log --oneline | wc -l)" >$@
 
 install:	$(TARGET)
 	install -c $(TARGET) $(DESTBIN)
 
 clean:
-	rm -rf $(TARGET) $(TARGET).tar.gz *.o TAGS
+	rm -rf vers.h $(TARGET) $(TARGET).tar.gz *.o TAGS
 
 tags:
 	etags $(TARGET).c

@@ -2008,6 +2008,7 @@ bool Parse_RFC822Date(Parser *par, struct tm *tm)
 	if (year < 100)
 	    year += 1900;
 
+	tm->tm_wday = wday;
 	tm->tm_mday = day;
 	tm->tm_mon = mon + 1;
 	tm->tm_year = year;

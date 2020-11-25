@@ -1989,19 +1989,19 @@ bool Parse_RFC822Date(Parser *par, struct tm *tm)
 
     // Parse and ignore <wday> ','
     if (Parse_Keyword(par, kWeekdays, &wday) &&
-	SS !Parse_ConstChar(par, ',', true, NULL))
+	(SS !Parse_ConstChar(par, ',', true, NULL)))
 	goto fail;
 
     // Parse <day> <mon> <year> <hour>:<min>:<sec> <zone>
-    if (SS !Parse_Integer(par, &day) ||
-	SS !Parse_Keyword(par, kMonths, &mon) ||
-	SS !Parse_Integer(par, &year) ||
-	SS !Parse_Integer(par, &hour) ||
+    if ((SS !Parse_Integer(par, &day)) ||
+	(SS !Parse_Keyword(par, kMonths, &mon)) ||
+	(SS !Parse_Integer(par, &year)) ||
+	(SS !Parse_Integer(par, &hour)) ||
 	!Parse_ConstChar(par, ':', false, NULL) ||
 	!Parse_Integer(par, &min) ||
 	!Parse_ConstChar(par, ':', false, NULL) ||
 	!Parse_Integer(par, &sec) ||
-	SS !Parse_TimeZone(par, &gmtoff, &isdst))
+	(SS !Parse_TimeZone(par, &gmtoff, &isdst)))
 	goto fail;
 
     if (tm != NULL) {
@@ -2024,7 +2024,7 @@ bool Parse_RFC822Date(Parser *par, struct tm *tm)
   fail:
     Parser_MoveTo(par, pos);
     return false;
-
+#undef SS
 }
 
 bool Parse_FuzzyDate(Parser *par, struct tm *tm)

@@ -1388,6 +1388,8 @@ bool Parse_Line(Parser *par, String **pLine)
     return Parse_UntilEnd(par, pLine);
 }
 
+// Parse an unsigned integer
+//
 bool Parse_Integer(Parser *par, int *pResult)
 {
     const char *p = String_Chars(&par->rest);
@@ -1748,24 +1750,74 @@ const String *kMonths[] = {
     NULL
 };
 
+// US Time Zones + UTC in different forms
+//
+String_Define(Str_EDT, "EDT"); // -0400
+String_Define(Str_EST, "EST"); // -0500
+String_Define(Str_CDT, "CDT"); // -0500
+String_Define(Str_CST, "CST"); // -0600
+String_Define(Str_MDT, "MDT"); // -0600
+String_Define(Str_MST, "MST"); // -0700
+String_Define(Str_PDT, "PDT"); // -0700
+String_Define(Str_PST, "PST"); // -0800
+String_Define(Str_UT, "UT");   //  0000
+String_Define(Str_UTC, "UTC"); //  0000
+String_Define(Str_GMT, "GMT"); //  0000
+
+const String *kZones[] = {
+    &Str_EDT, &Str_EST, &Str_CDT, &Str_CST, &Str_MDT, &Str_MST,
+    &Str_PDT, &Str_PST, &Str_UT, &Str_UTC, &Str_GMT, NULL
+};
+
+static bool ZoneIndexToGMTOffset(int zix, int *pGMTOffset, int *pIsDST)
+{
+    int gmtoff = 0, isdst = 0;
+
+    if (zix < 0)
+	return false;
+
+    // US zones are ordered by hours west of UTC
+    // UTC zone names come after the US zones
+    if (zix < 8) {
+	gmtoff = ((zix + 1) / 2) * -4 * 60 * 60;
+	isdst = (zix % 2) == 0;
+    }
+
+    if (pGMTOffset != NULL)
+	*pGMTOffset = gmtoff;
+    if (pIsDST != NULL)
+	*pIsDST = isdst;
+
+    return true;
+}
+
 // Returns -1 if none was found
 //
-static int ParseKeyword(Parser *par, const String **keywords)
+bool Parse_Keyword(Parser *par, const String **keywords, int *pIndex)
 {
     const String **sp;
 
     for (sp = keywords; *sp != NULL; sp++) {
 	if (Parse_ConstString(par, *sp, true, NULL)) {
-	    return sp - keywords;
+	    if (pIndex != NULL)
+		*pIndex = sp - keywords;
+	    return true;
 	}
     }
 
-    return -1;
+    return false;
+}
+
+static int ParseKeyword(Parser *par, const String **keywords)
+{
+    int index;
+
+    return Parse_Keyword(par, keywords, &index) ? index : -1;
 }
 
 // Returns -1 if no valid two digit number
 //
-static int ParseTwoDigits(Parser *par, bool leadingSpaceOK)
+static int ParseTwoDigits(Parser *par)
 {
     char c1, c2;
 
@@ -1803,26 +1855,26 @@ static bool ParseCTimeHelper(Parser *par, struct tm *pTime)
     if (!Parse_ConstChar(par, ' ', true, NULL))
 	return false;
 
-    day = ParseTwoDigits(par, true);
+    day = ParseTwoDigits(par);
     if (day == -1)
 	return false;
 
     if (!Parse_ConstChar(par, ' ', true, NULL))
 	return false;
 
-    hour = ParseTwoDigits(par, false);
+    hour = ParseTwoDigits(par);
     if (hour == -1)
 	return false;
 
     if (!Parse_ConstChar(par, ':', true, NULL))
 	return false;
     
-    min = ParseTwoDigits(par, false);
+    min = ParseTwoDigits(par);
     if (min == -1)
 	return false;
 
     if (Parse_ConstChar(par, ':', true, NULL)) {
-        sec = ParseTwoDigits(par, false);
+        sec = ParseTwoDigits(par);
 	if (sec == -1)
 	    return false;
     }
@@ -1841,8 +1893,8 @@ static bool ParseCTimeHelper(Parser *par, struct tm *pTime)
 	gotZone = true;
     }
     
-    int y1 = ParseTwoDigits(par, false);
-    int y2 = ParseTwoDigits(par, false);
+    int y1 = ParseTwoDigits(par);
+    int y2 = ParseTwoDigits(par);
 
     if (y1 == -1 || y2 == -1)
 	return false;
@@ -1880,14 +1932,194 @@ bool Parse_CTime(Parser *par, struct tm *pTime)
     return result;
 }
 
+bool Parse_TimeZone(Parser *par, int *pGMTOffset, int *pIsDST)
+{
+    int pos = Parser_Position(par);
+
+    // Named timezone?
+    //
+    int zix;
+    Parse_Spaces(par, NULL);
+    if (Parse_Keyword(par, kZones, &zix) &&
+	ZoneIndexToGMTOffset(zix, pGMTOffset, pIsDST))
+	return true;
+
+    // Numeric timezone?
+    //
+    String *sign;
+    int hhmm, mm;
+    Parse_Spaces(par, NULL);
+    if ((Parse_ConstChar(par, '+', false, &sign) ||
+	 Parse_ConstChar(par, '-', false, &sign)) &&
+	Parse_Integer(par, &hhmm)) {
+	// Allow for both hhmm and hh:mm
+	if (hhmm < 100 &&
+	    Parse_ConstChar(par, ':', false, NULL) &&
+	    Parse_Integer(par, &mm)) {
+	    hhmm = hhmm * 100 + mm;
+	}
+
+	int sec = (hhmm / 100) * 3600 + (hhmm % 100) * 60;
+	if (String_CharAt(sign, 0) == '-')
+	    sec = -sec;
+
+	if (pGMTOffset != NULL)
+	    *pGMTOffset = sec;
+	if (pIsDST != NULL)
+	    *pIsDST = -1;
+
+	return true;
+    }
+
+    Parser_MoveTo(par, pos);
+    return false;
+}
+
+// [<wday>',',] <day> <mon> <year> <time> <offset> ['('<zone>')']
+//
+bool Parse_RFC822Date(Parser *par, struct tm *tm)
+{
+    int pos = Parser_Position(par);
+
+// For convenience... (Note comma at the end)
+#define SS	Parse_Spaces(par, NULL),
+
+    int wday = -1, day, mon, year, hour, min, sec;
+    int gmtoff, isdst;
+
+    // Parse and ignore <wday> ','
+    if (Parse_Keyword(par, kWeekdays, &wday) &&
+	SS !Parse_ConstChar(par, ',', true, NULL))
+	goto fail;
+
+    // Parse <day> <mon> <year> <hour>:<min>:<sec> <zone>
+    if (SS !Parse_Integer(par, &day) ||
+	SS !Parse_Keyword(par, kMonths, &mon) ||
+	SS !Parse_Integer(par, &year) ||
+	SS !Parse_Integer(par, &hour) ||
+	!Parse_ConstChar(par, ':', false, NULL) ||
+	!Parse_Integer(par, &min) ||
+	!Parse_ConstChar(par, ':', false, NULL) ||
+	!Parse_Integer(par, &sec) ||
+	SS !Parse_TimeZone(par, &gmtoff, &isdst))
+	goto fail;
+
+    if (tm != NULL) {
+	if (year < 100)
+	    year += 1900;
+
+	tm->tm_mday = day;
+	tm->tm_mon = mon + 1;
+	tm->tm_year = year;
+	tm->tm_hour = hour;
+	tm->tm_min = min;
+	tm->tm_sec = sec;
+	tm->tm_gmtoff = gmtoff;
+	tm->tm_isdst = isdst;
+    }
+
+    return true;
+
+  fail:
+    Parser_MoveTo(par, pos);
+    return false;
+
+}
+
+bool Parse_FuzzyDate(Parser *par, struct tm *tm)
+{
+    int savedPos = Parser_Position(par);
+
+    int wday = -1, day = -1, mon = -1, year = -1, hour = -1, min = -1, sec = -1;
+    int gmtoff = -1, isdst = -1, num;
+
+    while (Parse_Spaces(par, NULL), !Parser_AtEnd(par)) {
+	if (Parse_ConstChar(par, ',', false, NULL) ||
+	    Parse_ConstChar(par, ':', false, NULL))
+	    continue;
+	if (wday == -1 && Parse_Keyword(par, kWeekdays, &wday))
+	    continue;
+	if (mon == -1 && Parse_Keyword(par, kMonths, &mon))
+	    continue;
+	// Allow for GMT-0700
+	if ((gmtoff == -1 || gmtoff == 0) &&
+	     Parse_TimeZone(par, &gmtoff, &isdst))
+	    continue;
+
+	int pos = Parser_Position(par);
+	if (Parse_Integer(par, &num)) {
+	    int digits = Parser_Position(par) - pos;
+
+	    if (day == -1 && digits < 3 && num > 0 && num < 32) {
+		day = num;
+	    } else if (year == -1 && (digits == 2 || digits == 4) &&
+		       num > 60 && num < 3000) {
+		year = num;
+	    } else if (hour == -1 && digits == 2 && num > 0 && num < 24) {
+		hour = num;
+	    } else if (min == -1 && digits == 2 && num > 0 && num < 60) {
+		min = num;
+	    } else if (sec == -1 && digits == 2 && num > 0 && num < 60) {
+		sec = num;
+	    } else {
+		goto fail;
+	    }
+
+	    continue;
+	}
+
+	goto fail;
+    }
+
+    if (year == -1 || mon == -1 || day == -1 ||
+	hour == -1 || min == -1 || sec == -1 || gmtoff == -1)
+	goto fail;
+
+    if (tm != NULL) {
+	// Map two digits years to 1950-2049
+	if (year < 50)
+	    year += 2000;
+	else if (year < 100)
+	    year += 1900;
+
+	tm->tm_wday = wday;
+	tm->tm_mday = day;
+	tm->tm_mon = mon + 1;
+	tm->tm_year = year;
+	tm->tm_hour = hour;
+	tm->tm_min = min;
+	tm->tm_sec = sec;
+	tm->tm_gmtoff = gmtoff;
+	tm->tm_isdst = isdst;
+    }
+
+    return true;
+
+  fail:
+    Parser_MoveTo(par, savedPos);
+    return false;
+}
+
+bool Scan_RFC822Date(String *string, struct tm *tm)
+{
+    Parser parser;
+
+    Parser_Set(&parser, string);
+    return Parse_RFC822Date(&parser, tm);
+}
+
+bool Scan_FuzzyDate(String *string, struct tm *tm)
+{
+    Parser parser;
+
+    Parser_Set(&parser, string);
+    return Parse_FuzzyDate(&parser, tm);
+}
+
+
 String *String_RFC822Date(struct tm *tm, bool withTimeZone)
 {
     if (withTimeZone)
-	return String_PrintF("%s, %2d %s %4d %02d:%02d:%02d",
-			     String_CString(kWeekdays[tm->tm_wday]),
-			     tm->tm_mday, String_CString(kMonths[tm->tm_mon]),
-			     tm->tm_year, tm->tm_hour, tm->tm_min, tm->tm_sec);
-    else
 	return String_PrintF("%s, %2d %s %4d %02d:%02d:%02d %c%02d%02d",
 			     String_CString(kWeekdays[tm->tm_wday]),
 			     tm->tm_mday, String_CString(kMonths[tm->tm_mon]),
@@ -1895,6 +2127,11 @@ String *String_RFC822Date(struct tm *tm, bool withTimeZone)
 			     tm->tm_gmtoff > 0 ? '+' : '-',
 			     labs(tm->tm_gmtoff / 3600),
 			     labs(tm->tm_gmtoff / 60 % 60));
+    else
+	return String_PrintF("%s, %2d %s %4d %02d:%02d:%02d",
+			     String_CString(kWeekdays[tm->tm_wday]),
+			     tm->tm_mday, String_CString(kMonths[tm->tm_mon]),
+			     tm->tm_year, tm->tm_hour, tm->tm_min, tm->tm_sec);
 }
 
 void Stream_WriteCTime(Stream *output, struct tm *tm)
@@ -3943,7 +4180,32 @@ void CheckMailbox(Mailbox *mbox, bool strict, bool repair)
 	// Got Date?
 	//
 	value = Header_Get(msg->headers, &Str_Date);
-	if (value == NULL) {
+	if (value != NULL) {
+	    // Check syntax
+	    struct tm tm;
+
+	    if (!Scan_RFC822Date(value, &tm)) {
+		if (Scan_FuzzyDate(value, &tm)) {
+		    String *newDate = String_RFC822Date(&tm, true);
+
+		    Warn("Invalid Date: \"%s\", %s with %s",
+			 String_CString(value),
+			 IsRepairingAll(&state) ? "replacing" : "could replace",
+			 String_CString(newDate));
+
+		    if (ShouldRepair(&state)) {
+			Header_Set(msg->headers, &Str_Date, newDate);
+		    } else {
+			String_Free(newDate);
+			if (state.quit)
+			    break;
+		    }
+		} else {
+		    Warn("Invalid Date: \"%s\", cannot repair",
+			 String_CString(value));
+		}
+	    }
+	} else {
 	    // Look for "X-Date: <date>"
 	    //
 	    source = &Str_XDate;

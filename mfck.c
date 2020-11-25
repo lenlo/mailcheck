@@ -59,6 +59,7 @@
 #define kString_MaxPrintFLength			1024
 #define kString_MaxPrettyLength			32
 
+#define kDefaultInboxFormat			"/var/mail/%s"
 #define kDefaultPageWidth			80
 #define kDefaultPageHeight			24
 
@@ -246,6 +247,7 @@ bool gDebug = false;
 #endif
 bool gDryRun = false;
 bool gInteractive = false;
+bool gLock = false;
 bool gMap = true;
 bool gShowContext = false;
 bool gStrict = false;
@@ -3174,7 +3176,7 @@ bool Mailbox_Lock(const String *source, int timeout)
     //String *tmpFile;
     //String *lockFile;
 
-    if (gDryRun)
+    if (gDryRun || !gLock)
 	return true;
 
 #ifdef OPT_CCLIENT_LOCK
@@ -3257,7 +3259,7 @@ bool Mailbox_Lock(const String *source, int timeout)
 
 void Mailbox_Unlock(const String *source)
 {
-    if (gDryRun)
+    if (gDryRun || !gLock)
 	return;
 
 #ifdef OPT_LOCK_FILE
@@ -5468,7 +5470,7 @@ void Usage(const char *pname, bool help)
     if (p != NULL)
 	pname = p + 1;
 
-    fprintf(stderr, "Usage: %s [-acdfhinopqruvN] <mbox> ...\n", pname);
+    fprintf(stderr, "Usage: %s [-acdfhinopqruvxN] <mbox> ...\n", pname);
 
     if (help) {
 	fprintf(stderr, "\n%s is a mailbox file checking tool.  It will allow "
@@ -5490,6 +5492,8 @@ void Usage(const char *pname, bool help)
 		"  -s \t\tbe strict and report more indiscretions than otherwise\n"
 		"  -u \t\tunique messages in each mailbox by removing duplicates\n"
 		"  -v \t\tbe verbose and print out more progress information\n"
+		"  -w \t\tautomatically write any changes when exiting\n"
+		"  -x \t\tlock the mbox file before opening it\n"
 		"  -C \t\tshow a few lines of context around parse errors\n"
 		"  -N \t\tdon't try to mmap the mbox file\n"
 		"  -V \t\tprint out %s version information and then exit\n",
@@ -5661,7 +5665,8 @@ int main(int argc, char **argv)
 		  case 's': gStrict = true; break;
 		  case 'u': Array_Append(commands, &Str_Unique); break;
 		  case 'v': gVerbose = true; break;
-		  case 'w': gAutoWrite= true; break;
+		  case 'w': gAutoWrite = true; break;
+		  case 'x': gLock = true; break;
 		  case 'C': gShowContext = true; break;
 		    //case 'L': gWantContentLength = true; break;
 		  case 'N': gMap = false; break;
@@ -5707,7 +5712,7 @@ int main(int argc, char **argv)
 	if (cMail != NULL) {
 	    mailFile = String_FromCString(cMail, false);
 	} else {
-	    mailFile = String_PrintF("/var/mail/%s", getenv("LOGNAME"));
+	    mailFile = String_PrintF(kDefaultInboxFormat, getenv("LOGNAME"));
 	}
 
 	errors += AddFiles(files, mailFile);

@@ -2743,7 +2743,7 @@ bool Parse_UntilFromSpace(Parser *par, int newlines)
 	for (i = 0; i < newlines && Parse_BackupNewline(par); i++);
 	// We succeeded if we found enough newlines before the From_
 	// line *and* we didn't go back before our starting position.
-	if (i == newlines && Parser_Position(par) > savedPos)
+	if (i == newlines && Parser_Position(par) >= savedPos)
 	    return true;
 
 	Parser_MoveTo(par, pos + String_Length(&Str_FromSpace));
@@ -5746,7 +5746,7 @@ void Usage(const char *pname, bool help)
 		"  -f <file> \tprocess mbox <file>\n"
 		"  -h \t\tprint out this help text\n"
 		"  -i \t\tinitiate interactive mode\n"
-		"  -l \t\tlist all messages in the mbox\n"
+		"  -l \t\tlist a summary all messages in the mailbox\n"
 		"  -n \t\tdry run -- no changes will be made to any file\n"
 		"  -o <file> \tconcatenate messages into <file>\n"
 		"  -q \t\tbe quiet and don't report warnings or notices\n"

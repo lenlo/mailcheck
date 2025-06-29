@@ -1,7 +1,7 @@
 /*
 **  mfck -- A mailbox checking tool (and more!)
 **
-**  Copyright (c) 2008-2019 by Lennart Lovstrand <mfck@lenlolabs.com>
+**  Copyright (c) 2008-2025 by Lennart Lovstrand <mfck@lenlolabs.com>
 */
 
 #include <stdio.h>
@@ -235,6 +235,17 @@ String_Define(Str_Strict, "strict");
 
 String_Define(Str_DotLock, ".lock");
 
+// Internal message components for the the X-IMAPBase carrier
+String_Define(Str_InternalFrom, "Mail System Internal Data <MAILER-DAEMON>");
+String_Define(Str_InternalSubject,
+	      "DON'T DELETE THIS MESSAGE -- FOLDER INTERNAL DATA");
+String_Define(Str_InternalDate, "Sat, 27 Apr 1963 02:14:37 +0200");
+String_Define(Str_InternalBody,
+"This text is part of the internal format of your mail folder, and is not\n" \
+"a real message.  It is created automatically by the mail system software.\n" \
+"If deleted, important folder data will be lost, and it will be re-created\n" \
+"with the data reset to initial values.\n");
+
 /*
 **  Global Variables
 */
@@ -268,7 +279,7 @@ FILE *gOpenPipe = NULL;
 
 const char gVersion[] = "mfck version 1.0";
 const char gCopyright[] =
-    "Copyright (c) 2008-2017, Lennart Lovstrand <mfck@lenlolabs.com>";
+    "Copyright (c) 2008-2025, Lennart Lovstrand <mfck@lenlolabs.com>";
 
 /*
 **  Forward Declarations
@@ -2190,6 +2201,13 @@ void Header_Free(Header *header, bool all)
     }
 }
 
+Headers* Headers_New(Message *msg)
+{
+    Headers *headers = New(Headers);
+    headers->msg = msg;
+    return headers;
+}
+
 void Headers_Free(Headers *headers)
 {
     Header_Free(headers->root, true);
@@ -2198,7 +2216,7 @@ void Headers_Free(Headers *headers)
 
 Headers *Headers_Clone(Headers *headers, Message *msg)
 {
-    Headers *newHeaders = New(Headers);
+    Headers *newHeaders = msg->headers;
     Header **pNewHead = &newHeaders->root;
     Header *oldHead;
 
@@ -2539,12 +2557,16 @@ String *MIME_GetParameter(String *str, const String *key)
  **  Message Functions
  **/
 
-Message *Message_New(Mailbox *mbox, int num)
+extern void Mailbox_Append(Mailbox *mbox, Message *msg);
+
+Message *Message_New(Mailbox *mbox)
 {
     Message *msg = New(Message);
 
-    msg->mbox = mbox;
-    msg->num = num;
+    msg->headers = Headers_New(msg);
+
+    if (mbox != NULL)
+	Mailbox_Append(mbox, msg);
 
     return msg;
 }
@@ -2572,7 +2594,7 @@ void Message_Free(Message *msg, bool all)
 
 Message *Message_Clone(Message *msg)
 {
-    Message *new = Message_New(NULL, 0);
+    Message *new = Message_New(NULL);
 
     new->tag = String_Clone(msg->tag);
     new->data = String_Clone(msg->data);
@@ -3354,7 +3376,8 @@ void Mailbox_Append(Mailbox *mbox, Message *msg)
 
     if (msg->mbox != NULL || msg->next != NULL)
 	Fatal(EX_SOFTWARE, "Internal error: Trying to add tied message "
-	      "%s to mailbox %s", msg->tag, Mailbox_Name(mbox));
+	      "%s to mailbox %s", String_Chars(msg->tag),
+	      String_Chars(Mailbox_Name(mbox)));
 
     while (*pRoot != NULL)
 	pRoot = &(*pRoot)->next;
@@ -3621,6 +3644,16 @@ Mailbox *Mailbox_Open(const String *source, bool create)
 
     return mbox;
 }
+
+String *RandomMessageID(void)
+{
+    String *result =
+	String_Alloc(1 + 10 + strlen(kSyntheticMessageIDSuffix) + 1);
+    sprintf((char *) String_Chars(result), "<%ld%s>", random(),
+	    kSyntheticMessageIDSuffix);
+    return result;
+}
+
 void Stream_WriteMailbox(Stream *output, Mailbox *mbox, bool sanitize)
 {
     // Dovecot and C-Client based IMAP implementations store internal
@@ -3651,6 +3684,19 @@ void Stream_WriteMailbox(Stream *output, Mailbox *mbox, bool sanitize)
 
 	if (msg != NULL && msg != first) {
 	    // Move X-IMAPBase header to first message
+	    if (first == NULL) {
+		// Create a new message if all messages have been deleted
+		first = Message_New(mbox);
+		Header_Set(first->headers, &Str_From,
+			   (String *) &Str_InternalFrom);
+		Header_Set(first->headers, &Str_Subject,
+			   (String *) &Str_InternalSubject);
+		Header_Set(first->headers, &Str_Date,
+			   (String *) &Str_InternalDate);
+		Header_Set(first->headers, &Str_MessageID, RandomMessageID());
+		Message_SetBody(first, (String *) &Str_InternalBody);
+	    }
+
 	    Header_Set(first->headers, &Str_XIMAPBase, String_Clone(imap));
 	    Header_Delete(msg->headers, &Str_XIMAP, false);
 	    Header_Delete(msg->headers, &Str_XIMAPBase, false);
@@ -3916,7 +3962,10 @@ int MessageSet_Next(MessageSet *set, int cur)
 
 void InterruptHandler(int signum)
 {
-    putchar('\n');
+    if (signum == SIGINT)
+	putchar('\n');
+    else
+	Error("Caught signal %d -- aborting", signum);
 
     if (gOpenPipe != NULL) {
 	pclose(gOpenPipe);
@@ -5685,7 +5734,7 @@ void RunLoop(Mailbox *mbox, Array *commands)
     if (Mailbox_IsDirty(mbox)) {
 	if (gDryRun)
 	    Note("Dry run mode -- not autosaving modified mailbox");
-	else if (true || gAutoWrite ||
+	else if (gAutoWrite ||
 		 (gInteractive &&
 		  User_AskYesOrNo("Save modified mailbox?", false)))
 	    Mailbox_Save(mbox, false, false);

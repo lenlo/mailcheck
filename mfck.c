@@ -298,6 +298,18 @@ static inline int iMin(int a, int b)	{return a < b ? a : b;}
 static inline int iMax(int a, int b)	{return a > b ? a : b;}
 
 /*
+**  Time Functions
+*/
+
+struct tm *Time_Now(struct tm *tm) {
+    static struct tm tm_now;
+    time_t now = time(0);
+    if (tm == NULL)
+	tm = &tm_now;
+    return localtime_r(&now, tm);
+}
+
+/*
 **  Char Functions
 */
 
@@ -1933,7 +1945,7 @@ static bool ParseCTimeHelper(Parser *par, struct tm *pTime)
 	pTime->tm_hour = hour;
 	pTime->tm_mday = day;
 	pTime->tm_mon = mon;
-	pTime->tm_year = year;
+	pTime->tm_year = year - 1900;
 	pTime->tm_wday = wday;
     }
 
@@ -2028,7 +2040,7 @@ bool Parse_RFC822Date(Parser *par, struct tm *tm)
 	tm->tm_wday = wday;
 	tm->tm_mday = day;
 	tm->tm_mon = mon + 1;
-	tm->tm_year = year;
+	tm->tm_year = year - 1900;
 	tm->tm_hour = hour;
 	tm->tm_min = min;
 	tm->tm_sec = sec;
@@ -2103,7 +2115,7 @@ bool Parse_FuzzyDate(Parser *par, struct tm *tm)
 	tm->tm_wday = wday;
 	tm->tm_mday = day;
 	tm->tm_mon = mon + 1;
-	tm->tm_year = year;
+	tm->tm_year = year - 1900;
 	tm->tm_hour = hour;
 	tm->tm_min = min;
 	tm->tm_sec = sec;
@@ -2141,15 +2153,16 @@ String *String_RFC822Date(struct tm *tm, bool withTimeZone)
 	return String_PrintF("%s, %2d %s %4d %02d:%02d:%02d %c%02d%02d",
 			     String_CString(kWeekdays[tm->tm_wday]),
 			     tm->tm_mday, String_CString(kMonths[tm->tm_mon]),
-			     tm->tm_year, tm->tm_hour, tm->tm_min, tm->tm_sec,
-			     tm->tm_gmtoff > 0 ? '+' : '-',
+			     tm->tm_year + 1900, tm->tm_hour, tm->tm_min,
+			     tm->tm_sec, tm->tm_gmtoff > 0 ? '+' : '-',
 			     labs(tm->tm_gmtoff / 3600),
 			     labs(tm->tm_gmtoff / 60 % 60));
     else
 	return String_PrintF("%s, %2d %s %4d %02d:%02d:%02d",
 			     String_CString(kWeekdays[tm->tm_wday]),
 			     tm->tm_mday, String_CString(kMonths[tm->tm_mon]),
-			     tm->tm_year, tm->tm_hour, tm->tm_min, tm->tm_sec);
+			     tm->tm_year + 1900, tm->tm_hour, tm->tm_min,
+			     tm->tm_sec);
 }
 
 void Stream_WriteCTime(Stream *output, struct tm *tm)
@@ -4681,58 +4694,30 @@ void EditMessage(Message *msg)
     Message_SetDirty(newMsg, true);
 }
 
-// "[Mon,]  1 Jan 2000 00:00:00 +0000 (GMT)" => " 1 Jan 00:00"
+// "[Mon,]  1 Jan 2000 00:00:00 +0000 (GMT)" => " 1 Jan 00:00" or "1 Jan 2000 "
 //
-void PrintShortDate(Stream *output, String *rfc822Date)
+void PrintShortDate(Stream *output, String *date)
 {
-    const char *chars = String_Chars(rfc822Date);
-    int len = String_Length(rfc822Date);
-    Parser tmp;
-    int pos;
-    String *day, *mon, *year, *time;
+    struct tm now, then;
 
-    Parser_Set(&tmp, rfc822Date);
+    if (Scan_RFC822Date(date, &then) || Scan_FuzzyDate(date, &then)) {
+	Time_Now(&now);
 
-    Parse_Spaces(&tmp, NULL);
+	int monthDiff = (now.tm_year * 12 + now.tm_mon) -
+	    (then.tm_year * 12 + then.tm_mon);
 
-    pos = Parser_Position(&tmp);
-    if (pos + 4 < len && chars[pos+3] == ',') {
-	// Skip weekday
-	Parse_UntilSpace(&tmp, NULL);
-	Parse_Spaces(&tmp, NULL);
+	Stream_PrintF(output, "%2d %s ",
+		      then.tm_mday, String_CString(kMonths[then.tm_mon]));
+
+	// Show year if > 6 months ago, otherwise time
+	if (monthDiff > 6) {
+	    Stream_PrintF(output, "%4d ", then.tm_year + 1900);
+	} else {
+	    Stream_PrintF(output, "%02d:%02d", then.tm_hour, then.tm_min);
+	}
+    } else {
+	Stream_PrintF(output, "-- --- --:--");
     }
-
-    // Should be pointing to the day now (which may be one or two digits)
-    //
-    Parse_UntilSpace(&tmp, &day);
-    Parse_Spaces(&tmp, NULL);
-
-    // Month
-    //
-    Parse_UntilSpace(&tmp, &mon);
-    Parse_Spaces(&tmp, NULL);
-    
-    // Year
-    //
-    Parse_UntilSpace(&tmp, &year);
-    Parse_Spaces(&tmp, NULL);
-    
-    // Time
-    //
-    Parse_UntilSpace(&tmp, &time);
-    Parse_Spaces(&tmp, NULL);
-
-    // OK,  let's do it!
-    //
-    Stream_PrintF(output, "%2.2s %-3.3s %-5.5s",
-		  String_CString(String_Safe(day)),
-		  String_CString(String_Safe(mon)),
-		  String_CString(String_Safe(time)));
-
-    String_Free(day);
-    String_Free(mon);
-    String_Free(year);
-    String_Free(time);
 }
 
 int IntLength(int num)

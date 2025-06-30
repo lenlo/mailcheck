@@ -237,6 +237,7 @@ String_Define(Str_DotLock, ".lock");
 
 // Internal message components for the the X-IMAPBase carrier
 String_Define(Str_InternalFrom, "Mail System Internal Data <MAILER-DAEMON>");
+String_Define(Str_InternalAddress, "MAILER-DAEMON");
 String_Define(Str_InternalSubject,
 	      "DON'T DELETE THIS MESSAGE -- FOLDER INTERNAL DATA");
 String_Define(Str_InternalDate, "Sat, 27 Apr 1963 02:14:37 +0200");
@@ -890,6 +891,9 @@ const char *String_QuotedCString(const String *str, int maxLength)
 {
     if (str == NULL)
 	return "(null)";
+
+    if (str->len == 0)
+	return "\"\"";
 
     char **pdup = String_NextCStringPoolSlot();    
     const char *chars = String_Chars(str);
@@ -2153,7 +2157,7 @@ void Stream_WriteCTime(Stream *output, struct tm *tm)
     Stream_PrintF(output, "%s %s %02d %02d:%02d:%02d %4d",
 		  String_CString(kWeekdays[tm->tm_wday]),
 		  String_CString(kMonths[tm->tm_mon]), tm->tm_mday,
-		  tm->tm_hour, tm->tm_min, tm->tm_sec, tm->tm_year);
+		  tm->tm_hour, tm->tm_min, tm->tm_sec, tm->tm_year + 1900);
 }
 
 
@@ -2637,6 +2641,18 @@ void Message_SetBody(Message *msg, String *body)
     Header_Set(msg->headers, &Str_ContentLength,
 	       String_PrintF("%d", String_Length(body)));
     Message_SetDirty(msg, true);
+}
+
+void Message_SetEnvelope(Message *msg, String *address, struct tm *date)
+{
+    // Default the date to right now
+    if (date == NULL) {
+	time_t now = time(NULL);
+	date = localtime(&now);
+    }
+
+    msg->envSender = address;
+    msg->envDate = *date;
 }
 
 bool Message_IsDeleted(Message *msg)
@@ -3376,8 +3392,8 @@ void Mailbox_Append(Mailbox *mbox, Message *msg)
 
     if (msg->mbox != NULL || msg->next != NULL)
 	Fatal(EX_SOFTWARE, "Internal error: Trying to add tied message "
-	      "%s to mailbox %s", String_Chars(msg->tag),
-	      String_Chars(Mailbox_Name(mbox)));
+	      "%s to mailbox %s", String_CString(msg->tag),
+	      String_CString(Mailbox_Name(mbox)));
 
     while (*pRoot != NULL)
 	pRoot = &(*pRoot)->next;
@@ -3695,6 +3711,8 @@ void Stream_WriteMailbox(Stream *output, Mailbox *mbox, bool sanitize)
 			   (String *) &Str_InternalDate);
 		Header_Set(first->headers, &Str_MessageID, RandomMessageID());
 		Message_SetBody(first, (String *) &Str_InternalBody);
+		Message_SetEnvelope(first, (String *) &Str_InternalAddress,
+				    NULL);
 	    }
 
 	    Header_Set(first->headers, &Str_XIMAPBase, String_Clone(imap));
@@ -3788,6 +3806,8 @@ bool User_AskLine(const char *prompt, const String **pLine, bool trim)
     static char *buf = NULL;
 
     xfree(buf);
+    // In case we get interrupted in readline
+    buf = NULL;
 
     buf = readline(prompt);
 
@@ -3963,7 +3983,7 @@ int MessageSet_Next(MessageSet *set, int cur)
 void InterruptHandler(int signum)
 {
     if (signum == SIGINT)
-	putchar('\n');
+	fprintf(stderr, "^C\n");
     else
 	Error("Caught signal %d -- aborting", signum);
 
@@ -4053,23 +4073,46 @@ typedef struct {
     bool repair;		// Are we repairing?
     char autoChoice;		// Should this choice apply without asking?
     bool quit;			// Have the user told us to quit repairing?
+    Message *msg;		// For ShouldRepair
 } RepairState;
 
 void InitRepairState(RepairState *state, bool repair)
 {
     state->repair = repair;
-    state->autoChoice = gInteractive ? '\0' : 'y';
+    state->autoChoice = (gInteractive || !repair) ? '\0' : 'y';
     state->quit = false;
 }
 
-bool IsRepairingAll(RepairState *state)
+void WarnRepairV(RepairState *state, char choice, const char *fmt, va_list args)
 {
-    return state->repair && state->autoChoice == 'y';
+    if (!gQuiet) {
+	fprintf(stderr, "%%Message %s: ", String_CString(state->msg->tag));
+	vfprintf(stdout, fmt, args);
+	if (choice == 'y')
+	    fprintf(stdout, " (repairing)");
+	fprintf(stdout, "\n");
+    }
+
+    gWarnings++;
 }
 
-bool ShouldRepair(RepairState *state)
+void WarnRepair(RepairState *state, const char *fmt, ...)
 {
+    va_list args;
+
+    va_start(args, fmt);
+    WarnRepairV(state, '\0', fmt, args);
+    va_end(args);
+}
+
+bool ShouldRepair(RepairState *state, const char *fmt, ...)
+{
+    va_list args;
     int choice = state->autoChoice;
+
+    va_start(args, fmt);
+    WarnRepairV(state, choice, fmt, args);
+    va_end(args);
 
     if (!state->repair)
 	return false;
@@ -4099,6 +4142,8 @@ void CheckMailbox(Mailbox *mbox, bool strict, bool repair)
 	const String *source = NULL;
 	int cllen;
 
+	state.msg = msg;
+
 	// Check Content-Length
 	//
 	value = Header_Get(msg->headers, &Str_ContentLength);
@@ -4113,35 +4158,26 @@ void CheckMailbox(Mailbox *mbox, bool strict, bool repair)
 	    //
 	    if (msg->dovecotFromSpaceBug != kDFSB_None) {
 		// Yup, remove bogus headers from the body
-		Warn("Message %s: Corrupted by Dovecot \"From \" bug%s",
-		     String_CString(msg->tag),
-		     IsRepairingAll(&state) ? " (repairing)" : "");
-
-		if (ShouldRepair(&state)) {
+		if (ShouldRepair(&state,
+				 "Corrupted by Dovecot \"From \" bug")) {
 		    RepairDovecotFromSpaceBugBody(msg);
 		    // Repairing the message will change it's length
 		    bodyLength = Message_BodyLength(msg);
-		} else if (state.quit)
-		    break;
+		}
 
 	    } else {
-		if (value == NULL)
-		    Warn("Message %s: Missing Content-Length:, should be %d%s",
-			 String_CString(msg->tag), bodyLength,
-			 IsRepairingAll(&state) ? " (repairing)" : "");
-		else
-		    Warn("Message %s: Incorrect Content-Length: %s, "
-			 "should be %d%s", String_CString(msg->tag),
-			 String_PrettyCString(value), bodyLength,
-			 IsRepairingAll(&state) ? " (repairing)" : "");
-
-		if (ShouldRepair(&state))
+		const char *fmt = (value == NULL) ?
+		    "Missing Content-Length:%.0s, should be %d" :
+		    "Incorrect Content-Length: %s, should be %d";
+		if (ShouldRepair(&state, fmt,
+				 String_PrettyCString(value), bodyLength)) {
 		    Header_Set(msg->headers, &Str_ContentLength,
 			       String_PrintF("%d", bodyLength));
-		else if (state.quit)
-		    break;
+		}
 	    }
 	}
+	if (state.quit)
+	    break;
 
 	// Got Message-ID?
 	//
@@ -4153,17 +4189,14 @@ void CheckMailbox(Mailbox *mbox, bool strict, bool repair)
 	    if (value == NULL || String_IsEmpty(value)) {
 		String *synthID = Message_SynthesizeMessageID(msg);
 
-		Warn("Message %s: Missing Message-ID: header, %s with %s",
-		     String_CString(msg->tag),
-		     IsRepairingAll(&state) ? "replacing" : "could replace",
-		     String_CString(synthID));
-
-		if (ShouldRepair(&state))
+		if (ShouldRepair(&state, "Missing Message-ID: header, could " \
+				 "replace with %s", String_CString(synthID))) {
 		    Header_Set(msg->headers, &Str_MessageID, synthID);
-		else if (state.quit)
-		    break;
+		}
 	    }
 	}
+	if (state.quit)
+	    break;
 
 	// Only strict tests below
 	//
@@ -4173,17 +4206,14 @@ void CheckMailbox(Mailbox *mbox, bool strict, bool repair)
 	// Got ">From " in headers?
 	//
 	value = Header_Get(msg->headers, &Str_GTFromSpace);
-	if (value != NULL) {
-	    Warn("Message %s: Bogus \">From \" line in the the headers:\n"
-		 " \">From %s\"%s",
-		 String_CString(msg->tag), String_CString(value),
-		 IsRepairingAll(&state) ? " (removing)" : "");
-
-	    if (ShouldRepair(&state))
-		Header_Delete(msg->headers, &Str_GTFromSpace, false);
-	    else if (state.quit)
-		break;
+	if (value != NULL && 
+	    ShouldRepair(&state,
+			 "Bogus \">From \" line in the the headers:\n"
+			 " \">From %s\"", String_CString(value))) {
+	    Header_Delete(msg->headers, &Str_GTFromSpace, false);
 	}
+	if (state.quit)
+	    break;
 
 	// Got From?
 	//
@@ -4208,24 +4238,20 @@ void CheckMailbox(Mailbox *mbox, bool strict, bool repair)
 	    }
 
 	    if (value == NULL) {
-		Warn("Message %s: Missing From: header",
-		     String_CString(msg->tag));
+		WarnRepair(&state, "Missing From: header");
 
-	    } else {
-		Warn("Message %s: Missing From: header, %s %s:\n"
-		     " \"%s\"", String_CString(msg->tag),
-		     IsRepairingAll(&state) ? "using" : "but could use",
-		     String_CString(source), String_CString(value));
-
-		if (ShouldRepair(&state)) {
-		    Header_Set(msg->headers, &Str_From, value);
-		    value = NULL;
-		} else if (state.quit)
-		    break;
+	    } else if (ShouldRepair(&state,
+				    "Missing From: header, but could use %s:\n"
+				    " \"%s\"", String_CString(source),
+				    String_CString(value))) {
+		Header_Set(msg->headers, &Str_From, value);
+		value = NULL;
 	    }
 
 	    String_Free(value);
 	}
+	if (state.quit)
+	    break;
 
 	// Got Date?
 	//
@@ -4238,21 +4264,17 @@ void CheckMailbox(Mailbox *mbox, bool strict, bool repair)
 		if (Scan_FuzzyDate(value, &tm)) {
 		    String *newDate = String_RFC822Date(&tm, true);
 
-		    Warn("Invalid Date: \"%s\", %s with %s",
-			 String_CString(value),
-			 IsRepairingAll(&state) ? "replacing" : "could replace",
-			 String_CString(newDate));
-
-		    if (ShouldRepair(&state)) {
+		    if (ShouldRepair(&state, "Invalid Date: \"%s\", "
+				     "could replace with %s",
+				     String_CString(value),
+				     String_CString(newDate))) {
 			Header_Set(msg->headers, &Str_Date, newDate);
 		    } else {
 			String_Free(newDate);
-			if (state.quit)
-			    break;
 		    }
 		} else {
-		    Warn("Invalid Date: \"%s\", cannot repair",
-			 String_CString(value));
+		    WarnRepair(&state, "Invalid Date: \"%s\", cannot repair",
+			       String_CString(value));
 		}
 	    }
 	} else {
@@ -4287,24 +4309,20 @@ void CheckMailbox(Mailbox *mbox, bool strict, bool repair)
 	    }
 
 	    if (value == NULL) {
-		Warn("Message %s: Missing Date: header",
-		     String_CString(msg->tag));
+		WarnRepair(&state, "Missing Date: header");
 
-	    } else {
-		Warn("Message %s: Missing Date: header, %s %s:\n"
-		     " \"%s\"", String_CString(msg->tag),
-		     IsRepairingAll(&state) ? "using" : "but could use",
-		     String_CString(source), String_CString(value));
-
-		if (ShouldRepair(&state)) {
-		    Header_Set(msg->headers, &Str_Date, value);
-		    value = NULL;
-		} else if (state.quit)
-		    break;
+	    } else if (ShouldRepair(&state,
+				    "Missing Date: header, but could use %s:\n"
+				    "\"%s\"", String_CString(source),
+				    String_CString(value))) {
+		Header_Set(msg->headers, &Str_Date, value);
+		value = NULL;
 	    }
 
 	    String_Free(value);
 	}
+	if (state.quit)
+	    break;
 
 	// Make sure there's no (undeclared) binary data in headers or body
 	//
@@ -4313,10 +4331,9 @@ void CheckMailbox(Mailbox *mbox, bool strict, bool repair)
 	for (head = msg->headers->root; head != NULL; head = head->next) {
 	    int pos = FindIllegalChar(head->line, false, false);
 	    if (pos >= 0) {
-		Warn("Message %s: Illegal character %s in header:\n"
-		     " %s", String_CString(msg->tag),
-		     Char_QuotedCString(String_CharAt(head->line, pos)),
-		     String_PrettyCString(head->line));
+		WarnRepair(&state, "Illegal character %s in header:\n %s",
+			   Char_QuotedCString(String_CharAt(head->line, pos)),
+			   String_PrettyCString(head->line));
 	    }
 	}
 
@@ -4332,8 +4349,7 @@ void CheckMailbox(Mailbox *mbox, bool strict, bool repair)
 		int off = iMax(0, pos - kString_ExcerptLength / 2);
 		String *sub = String_Sub(body, off, String_Length(body));
 
-		Warn("Message %s: Illegal character %s in body:\n %s%s",
-		     String_CString(msg->tag),
+		WarnRepair(&state, "Illegal character %s in body:\n %s%s",
 		     Char_QuotedCString(String_CharAt(body, pos)),
 		     off == 0 ? "" : "...",
 		     String_QuotedCString(sub, kString_ExcerptLength));

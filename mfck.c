@@ -23,6 +23,8 @@
 #include <dirent.h>
 #include <limits.h>
 #include <sys/ioctl.h>
+#include <paths.h>
+#include <pwd.h>
 
 #ifdef USE_READLINE
 #  include <readline/readline.h>
@@ -59,7 +61,6 @@
 #define kString_MaxPrintFLength			1024
 #define kString_MaxPrettyLength			32
 
-#define kDefaultInboxFormat			"/var/mail/%s"
 #define kDefaultPageWidth			80
 #define kDefaultPageHeight			24
 
@@ -268,6 +269,7 @@ bool gUnique = false;
 bool gVerbose = false;
 //bool gWantContentLength = false;
 
+const char *gProgName;
 int gWarnings = 0;
 int gMessageCounter = 0;
 String *gPager = NULL;
@@ -5792,19 +5794,15 @@ bool ProcessFile(String *file, Array *commands, Stream *output)
     return true;
 }
 
-void Usage(const char *pname, bool help)
+void Usage(bool help)
 {
-    const char *p = strrchr(pname, '/');
-    if (p != NULL)
-	pname = p + 1;
-
-    fprintf(stderr, "Usage: %s [-acdfhinopqruvxN] <mbox> ...\n", pname);
+    fprintf(stderr, "Usage: %s [-acdfhinopqruvxN] <mbox> ...\n", gProgName);
 
     if (help) {
 	fprintf(stderr, "\n%s is a mailbox file checking tool.  It will allow "
 		"you to check\nyour mbox files' integrity, examine their "
 		"contents, and optionally\nperform automatic repairs.\n",
-		pname);
+		gProgName);
 	fprintf(stderr, "\nOptions include:\n"
 		"  -b \t\tbackup mbox to mbox~ before changing it\n"
 		"  -c \t\tcheck the mbox for consistency\n"
@@ -5825,26 +5823,26 @@ void Usage(const char *pname, bool help)
 		"  -C \t\tshow a few lines of context around parse errors\n"
 		"  -N \t\tdon't try to mmap the mbox file\n"
 		"  -V \t\tprint out %s version information and then exit\n",
-		pname);
+		gProgName);
 	fprintf(stderr, "\nIf given no options, %s will simply to try read "
-		"the given mbox files\nand then quit. ", pname);
+		"the given mbox files\nand then quit. ", gProgName);
 
 	fprintf(stderr, "More interesting usage examples would be:\n\n");
 	fprintf(stderr, "%s -c mbox\tto check the mbox file and report "
-		"most errors\n", pname);
+		"most errors\n", gProgName);
 	fprintf(stderr, "%s -cs mbox\tto check the mbox file and report "
-		"more errors\n", pname);
+		"more errors\n", gProgName);
 	fprintf(stderr, "%s -rb mbox\tto check the mbox, perform any "
 		"necessary repairs, and save\n\t\tthe original file as "
-		"mbox~\n", pname);
+		"mbox~\n", gProgName);
 	fprintf(stderr, "%s -ci mbox\tto check the mbox and then enter an "
 		"interactive mode where\n\t\tyou can further inspect it "
-		"and make possible changes\n", pname);
+		"and make possible changes\n", gProgName);
 	fprintf(stderr, "\nIf you just want to test things out without making "
 		"any changes, add the -n\nflag and no files will be "
 		"modified.\n");
     } else {
-	fprintf(stderr, " (Run \"%s -h\" for more information)\n", pname);
+	fprintf(stderr, " (Run \"%s -h\" for more information)\n", gProgName);
     }
 
     Exit(EX_USAGE);
@@ -5857,7 +5855,14 @@ void ShowVersion(void)
 
 String *NextMainArg(int *pAC, int argc, char **argv)
 {
-    return *pAC < argc ? String_FromCString(argv[++*pAC], false) : NULL;
+    if (*pAC < argc - 1)
+	return String_FromCString(argv[++*pAC], false);
+
+    fprintf(stderr, "%s: Missing argument for %s\n", gProgName, argv[argc-1]);
+    Exit(EX_USAGE);
+
+    // NOT_REACHED
+    return NULL;
 }
 
 void Exit(int ret)
@@ -5908,6 +5913,52 @@ int AddFiles(Array *files, String *path)
     return errors;
 }
 
+String *DefaultMailboxPath(void)
+{
+    const char *mail = getenv("MAIL");
+
+    if (mail != NULL)
+	return String_FromCString(mail, false);
+
+    const char *user = getenv("LOGNAME");
+
+    if (user == NULL)
+	user = getenv("USER");
+
+    if (user == NULL) {
+	struct passwd *pw = getpwuid(getuid());
+	if (pw != NULL)
+	    user = pw->pw_name;
+    }
+
+    if (user == NULL)
+	Fatal(EX_NOUSER, "Can't determine the current user");
+
+    static char path[PATH_MAX];
+    path[sizeof(path)-1] = '\0';
+
+    snprintf(path, sizeof(path)-1, "%s/%s", _PATH_MAILDIR, user);
+
+    struct stat sbuf;
+
+    // Does <maildir>/<user> exist in some form?
+    if (stat(path, &sbuf) != 0) {
+	perror(path);
+	Exit(EX_NOINPUT);
+    }
+
+    // Is the user's mailbox an IMAP directory?
+    if (S_ISDIR(sbuf.st_mode)) {
+	strncat(path, "/INBOX", sizeof(path) - strlen(path) - 1);
+	if (stat(path, &sbuf) != 0) {
+	    perror(path);
+	    Exit(EX_NOINPUT);
+	}
+    }
+
+    return String_FromCString(path, false);
+}
+
 int main(int argc, char **argv)
 {
     gLockedMailboxes = Array_New(0, (Free *) String_Free);
@@ -5923,6 +5974,11 @@ int main(int argc, char **argv)
 
     if (cPager == NULL)
 	cPager = "more";
+
+    gProgName = argv[0];
+    const char *p = strrchr(gProgName, '/');
+    if (p != NULL)
+	gProgName = p + 1;
 
     //gInteractive = isatty(0);
     gPager = String_FromCString(cPager, false);
@@ -5941,9 +5997,9 @@ int main(int argc, char **argv)
     signal(SIGSEGV, InterruptHandler);
     signal(SIGTERM, InterruptHandler);
 
-    // Give usage if no arguments at all were given
+    // Default to -i if there are no options
     if (argc == 1)
-	Usage(argv[0], false);
+	gInteractive = true;
 
     for (ac = 1; ac < argc && argv[ac][0] == '-'; ac++) {
 	if (argv[ac][1] == '-') {
@@ -5960,7 +6016,7 @@ int main(int argc, char **argv)
 	    } else if (strcmp(opt, "verbose") == 0) {
 		gVerbose = true;
 	    } else if (strcmp(opt, "help") == 0) {
-		Usage(argv[0], true);
+		Usage(true);
 	    } else if (strcmp(opt, "version") == 0) {
 		ShowVersion();
 		Exit(0);
@@ -5983,7 +6039,7 @@ int main(int argc, char **argv)
 		    if (AddFiles(files, NextMainArg(&ac, argc, argv)) != 0)
 			Exit(1);
 		    break;
-		  case 'h': Usage(argv[0], true); break;
+		  case 'h': Usage(true); break;
 		  case 'i': gInteractive = true; break;
 		  case 'l': Array_Append(commands, &Str_List); break;
 		  case 'n': gDryRun = true; break;
@@ -5999,8 +6055,7 @@ int main(int argc, char **argv)
 		    //case 'L': gWantContentLength = true; break;
 		  case 'N': gMap = false; break;
 		  case 'V': ShowVersion(); Exit(0); break;
-		  default:
-		    Usage(argv[0], false);
+		  default:  Usage(false);
 		}
 	    }
 	}
@@ -6026,24 +6081,13 @@ int main(int argc, char **argv)
     }
 
     // The rest should all be mbox files (or directories thereof)
-    if (ac < argc) {
-	for (; ac < argc; ac++) {
-	    errors += AddFiles(files, String_FromCString(argv[ac], false));
-	}
+    for (; ac < argc; ac++) {
+	errors += AddFiles(files, String_FromCString(argv[ac], false));
+    }
 
-	// Default to the user's inbox if no explicit files were given
-    } else if (Array_Count(files) == 0) {
-	const char *cMail = getenv("MAIL");
-	String *mailFile;
-
-	// XXX: FIXME!
-	if (cMail != NULL) {
-	    mailFile = String_FromCString(cMail, false);
-	} else {
-	    mailFile = String_PrintF(kDefaultInboxFormat, getenv("LOGNAME"));
-	}
-
-	errors += AddFiles(files, mailFile);
+    // Default to the user's inbox if no explicit files were given
+    if (Array_Count(files) == 0) {
+	errors += AddFiles(files, DefaultMailboxPath());
     }
 
     // Process the mbox files

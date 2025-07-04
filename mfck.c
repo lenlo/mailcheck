@@ -1536,10 +1536,9 @@ Stream *Stream_OpenTemp(const String *path, bool write, bool fail)
 
     int fd = mkstemp(template);
     if (fd == -1) {
-	if (fail)
-	    Fatal(EX_CANTCREAT, "Can't create temporary file %s", template);
-	else
-	    return NULL;
+	Fatal(fail ? EX_CANTCREAT : EX_OK,
+	      "Can't create temporary file %s", template);
+	return NULL;
     }
 
     Stream *stream = Stream_New(fdopen(fd, write ? "w" : "r"),
@@ -3760,7 +3759,9 @@ bool Mailbox_Write(Mailbox *mbox, const String *destination, bool fatal)
     // Only mbox file destinations supported for now
     //
     const String *file = destination;
-    Stream *tmp = Stream_OpenTemp(file, true, true);
+    Stream *tmp = Stream_OpenTemp(file, true, fatal);
+    if (tmp == NULL)
+	return false;
 
     Stream_WriteMailbox(tmp, mbox, true);
     Stream_Close(tmp);

@@ -3,8 +3,9 @@
 #
 #	Copyright (c) 2008-2025 by Lennart Lovstrand <mfck@lenlolabs.com>
 #
-#	Add -DUSE_READLINE to the CFLAGS and -lreadline to LOADLIBES if you
-#	have the readline library available.
+#	Remove -DUSE_READLINE from the CFLAGS and -lreadline from LOADLIBES
+#	if you don't have the readline library available or would rather run
+#	without it.
 #
 #	There's probably no good reason to add -DUSE_GC & -lgc for now.
 #	It's experimental and the code should run fine without it.

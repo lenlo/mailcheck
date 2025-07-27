@@ -5373,8 +5373,8 @@ void RunLoop(Mailbox *mbox, Array *commands)
 #ifdef USE_READLINE
     rl_completion_entry_function =
 #ifndef RL_VERSION_MAJOR
-	/* Ugh. GNU's readline package declares rl_completion_entry_function
-	 * to return a char *, which is correct, but Apple's libedit package
+	/* GNU's readline package declares rl_completion_entry_function to
+	 * return a char *, which is correct, but Apple's libedit package
 	 * with its readline compatibility headers declares it to return an
 	 * int, which is incorrect, as it should return a char * even under
 	 * libedit. To make this code compile cleanly, we need to cast our

@@ -83,6 +83,8 @@ typedef enum {kString_Shared = 0, kString_Alloced, kString_Mapped,
 
 #define kString_NotFound			-1
 
+typedef int CTypeFunction(int);
+
 typedef void Free(void *);
 
 typedef struct {
@@ -142,6 +144,7 @@ typedef struct _Mailbox {
     Message *root;
     int count;
     bool dirty;
+    bool hasFromSpace;
 } Mailbox;
 
 typedef struct {
@@ -307,6 +310,10 @@ struct tm *Time_Now(struct tm *tm) {
     if (tm == NULL)
 	tm = &tm_now;
     return localtime_r(&now, tm);
+}
+
+bool Time_IsValid(struct tm *tm) {
+    return tm->tm_mday != 0;
 }
 
 /*
@@ -769,6 +776,18 @@ int _String_FindLastTwoChars(const String *str, char ach, char bch)
 	if (*p == ach || *p == bch)
 	    return p - begin;
     }
+
+    return kString_NotFound;
+}
+
+int String_Find(const String *str, CTypeFunction *func, bool match)
+{
+    const char *p = String_Chars(str);
+    const char *end = p + String_Length(str);
+
+    for (; p < end; p++)
+	if (!!(*func)(*p) == match)
+	    return p - String_Chars(str);
 
     return kString_NotFound;
 }
@@ -1288,6 +1307,19 @@ bool Parse_Spaces(Parser *par, String **pResult)
     return true;
 }
 
+bool Parse_BackupSpaces(Parser *par)
+{
+    const char *b = String_Chars(&par->rest);
+    const char *p = b;
+
+    while (p > par->start && p[-1] == ' ')
+	p--;
+
+    Parser_Move(par, p - b);
+
+    return p < b;
+}
+
 bool Parse_BackupNewline(Parser *par)
 {
     const char *b = String_Chars(&par->rest);
@@ -1319,6 +1351,39 @@ bool Parse_Newline(Parser *par, String **pResult)
 	return false;
 
     Parser_Move(par, len);
+    return true;
+}
+
+bool Parse_While(Parser *par, CTypeFunction *isChar, String **pResult)
+{
+    int pos = String_Find(&par->rest, isChar, false);
+
+    if (pos == kString_NotFound)
+	pos = String_Length(&par->rest);
+
+    if (pResult != NULL)
+	*pResult = String_New(kString_Shared, String_Chars(&par->rest), pos);
+
+    Parser_Move(par, pos);
+
+    return true;
+}
+
+bool Parse_Until(Parser *par, CTypeFunction *isChar, String **pResult)
+{
+    int pos = String_Find(&par->rest, isChar, true);
+
+    if (pos == kString_NotFound) {
+	if (pResult != NULL)
+	    *pResult = NULL;
+	return false;
+    }
+
+    if (pResult != NULL)
+	*pResult = String_New(kString_Shared, String_Chars(&par->rest), pos);
+
+    Parser_Move(par, pos);
+
     return true;
 }
 
@@ -2038,7 +2103,7 @@ bool Parse_RFC822Date(Parser *par, struct tm *tm)
 
 	tm->tm_wday = wday;
 	tm->tm_mday = day;
-	tm->tm_mon = mon + 1;
+	tm->tm_mon = mon;
 	tm->tm_year = year - 1900;
 	tm->tm_hour = hour;
 	tm->tm_min = min;
@@ -2066,9 +2131,11 @@ bool Parse_FuzzyDate(Parser *par, struct tm *tm)
 	if (Parse_ConstChar(par, ',', false, NULL) ||
 	    Parse_ConstChar(par, ':', false, NULL))
 	    continue;
-	if (wday == -1 && Parse_Keyword(par, kWeekdays, &wday))
+	if (wday == -1 && Parse_Keyword(par, kWeekdays, &wday) &&
+	    Parse_While(par, &isalpha, NULL))
 	    continue;
-	if (mon == -1 && Parse_Keyword(par, kMonths, &mon))
+	if (mon == -1 && Parse_Keyword(par, kMonths, &mon) &&
+	    Parse_While(par, &isalpha, NULL))
 	    continue;
 	// Allow for GMT-0700
 	if ((gmtoff == -1 || gmtoff == 0) &&
@@ -2081,10 +2148,9 @@ bool Parse_FuzzyDate(Parser *par, struct tm *tm)
 
 	    if (day == -1 && digits < 3 && num > 0 && num < 32) {
 		day = num;
-	    } else if (year == -1 && (digits == 2 || digits == 4) &&
-		       num > 60 && num < 3000) {
+	    } else if (year == -1 && (digits == 2 || digits == 4)) {
 		year = num;
-	    } else if (hour == -1 && digits == 2 && num > 0 && num < 24) {
+	    } else if (hour == -1 && digits <= 2 && num > 0 && num < 24) {
 		hour = num;
 	    } else if (min == -1 && digits == 2 && num > 0 && num < 60) {
 		min = num;
@@ -2113,7 +2179,7 @@ bool Parse_FuzzyDate(Parser *par, struct tm *tm)
 
 	tm->tm_wday = wday;
 	tm->tm_mday = day;
-	tm->tm_mon = mon + 1;
+	tm->tm_mon = mon;
 	tm->tm_year = year - 1900;
 	tm->tm_hour = hour;
 	tm->tm_min = min;
@@ -2687,7 +2753,6 @@ static bool ParseFromSpaceHelper(Parser *par, String **pEnvSender,
 {
     int savedpos = Parser_Position(par);
 
-
     if (pEnvSender != NULL)
 	*pEnvSender = NULL;
 
@@ -2728,33 +2793,44 @@ static bool ParseFromSpaceHelper(Parser *par, String **pEnvSender,
     String_FreeP(pEnvSender);
     Parser_MoveTo(par, senderpos);
 
+    // Try <64-bit-integer><newline> that I've seen on some USENET archives
+    //
+    (void) Parse_ConstChar(par, '-', false, NULL);
+    if (Parse_While(par, isdigit, pEnvSender) &&
+	Parse_Newline(par, NULL)) {
+	// Clear the date
+	if (pEnvTime != NULL)
+	    memset(pEnvTime, 0, sizeof(*pEnvTime));
+	return true;
+    }
+
     // Try <sender-with-comments> <date><newline>
     //
     // First look for newline.
     //
-    if (!Parse_UntilNewline(par, NULL)) {
-	Parser_MoveTo(par, savedpos);
-	return false;
-    }
+    if (!Parse_UntilNewline(par, NULL))
+	goto fail;
 
-    // The date is always 24 chars long.
+    // A ctime date is always exactly 24 chars long.
     //
     int nlpos = Parser_Position(par);
-    Parser_MoveTo(par, nlpos - 24);
+    int datepos = nlpos - 24;
+    if (datepos <= senderpos)
+	goto fail;
 
     // Try get the date
     //
-    if (!Parse_CTime(par, pEnvTime)) {
-	Parser_MoveTo(par, savedpos);
-	return false;
-    }
+    Parser_MoveTo(par, datepos);
+    if (!Parse_CTime(par, pEnvTime))
+	goto fail;
 
     // Finally, the grab the sender
     //
     if (pEnvSender != NULL) {
 	Parser_MoveTo(par, senderpos);
 	Parse_StringStart(par, pEnvSender);
-	Parser_MoveTo(par, nlpos - 24);
+	Parser_MoveTo(par, datepos);
+	Parse_BackupSpaces(par);
 	Parse_StringEnd(par, *pEnvSender);
     }
 
@@ -2762,6 +2838,10 @@ static bool ParseFromSpaceHelper(Parser *par, String **pEnvSender,
     Parse_Newline(par, NULL);
 
     return true;
+
+  fail:
+    Parser_MoveTo(par, savedpos);
+    return false;
 }
 
 bool Parse_FromSpaceLine(Parser *par, String **pLine, String **pEnvSender,
@@ -2814,7 +2894,6 @@ void WarnContentLength(Message *msg, int contLen, int bodyLen)
     if (delta > 1 && contLen > bodyLen) {
 	Warn("Message %s: Truncated, %d bytes missing",
 	     String_CString(msg->tag), contLen - bodyLen);
-
     } else if (delta > 1 && contLen < bodyLen) {
 	Warn("Message %s: Oversized, %d bytes too many",
 	     String_CString(msg->tag), bodyLen - contLen);
@@ -3205,8 +3284,8 @@ void MoveToEndOfMessage(Parser *par, Message *msg)
 
 	String_Free(boundary);
 			
-	if (done)
-	    // Got it!
+	if (done && !msg->mbox->hasFromSpace)
+	    // Got it! Return unless we still want a "From " line too
 	    return;
     }
 
@@ -3276,7 +3355,8 @@ bool Parse_Message(Parser *par, Mailbox *mbox, bool useAllData, Message **pMsg)
 {
     // Skip over possible newslines (should not be here, but...)
     if (Parse_Newline(par, NULL)) {
-	Warn("Unexpected newline(s) after message %d", mbox->count);
+	if (gStrict)
+	    Warn("Unexpected newline(s) after message %d", mbox->count);
 	while (Parse_Newline(par, NULL));
     }
 
@@ -3340,8 +3420,10 @@ void Stream_WriteMessage(Stream *output, Message *msg)
     } else if (msg->envSender != NULL) {
 	Stream_WriteString(output, &Str_FromSpace);
 	Stream_WriteString(output, msg->envSender);
-	Stream_WriteChar(output, ' ');
-	Stream_WriteCTime(output, &msg->envDate);
+	if (Time_IsValid(&msg->envDate)) {
+	    Stream_WriteChar(output, ' ');
+	    Stream_WriteCTime(output, &msg->envDate);
+	}
 	Stream_WriteNewline(output);
     }
     Stream_WriteHeaders(output, msg->headers);
@@ -3643,6 +3725,8 @@ Mailbox *Mailbox_OpenQuietly(const String *source, bool create)
 
     if (data != NULL) {
 	Parser_Set(&parser, data);
+	mbox->hasFromSpace = Parse_FromSpaceLine(&parser, NULL, NULL, NULL);
+	Parser_MoveTo(&parser, 0);
 	Parse_Messages(&parser, mbox);
     }
 
@@ -4076,7 +4160,8 @@ static int FindIllegalChar(String *str, bool controlOK, bool eightBitOK)
     for (i = 0; i < len; i++, chars++) {
 	if (*chars == '\r' || *chars == '\n' || *chars == '\t')
 	    continue;
-	if (!controlOK && ((*chars >= '\0' && *chars < ' ') || *chars == '\177'))
+	if (!controlOK &&
+	    ((*chars >= '\0' && *chars < ' ') || *chars == '\177'))
 	    return i;
 	if (!eightBitOK && !isascii(*chars))
 	    return i;
@@ -4102,7 +4187,7 @@ void InitRepairState(RepairState *state, bool repair)
 void WarnRepairV(RepairState *state, char choice, const char *fmt, va_list args)
 {
     if (!gQuiet) {
-	fprintf(stderr, "%%Message %s: ", String_CString(state->msg->tag));
+	fprintf(stdout, "%%Message %s: ", String_CString(state->msg->tag));
 	vfprintf(stdout, fmt, args);
 	if (choice == 'y')
 	    fprintf(stdout, " (repairing)");
@@ -4159,6 +4244,16 @@ void CheckMailbox(Mailbox *mbox, bool strict, bool repair)
 	int cllen;
 
 	state.msg = msg;
+
+	// Check "From " line's date
+	if (!Time_IsValid(&msg->envDate)) {
+	    if (ShouldRepair(&state, "Missing envelope date")) {
+		// Replace with the current time
+		Time_Now(&msg->envDate);
+		// Invalidate existing envelope string
+		String_FreeP(&msg->envelope);
+	    }
+	}
 
 	// Check Content-Length
 	//

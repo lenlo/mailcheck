@@ -4252,8 +4252,11 @@ void CheckMailbox(Mailbox *mbox, bool strict, bool repair)
 		Time_Now(&msg->envDate);
 		// Invalidate existing envelope string
 		String_FreeP(&msg->envelope);
+		Message_SetDirty(msg, true);
 	    }
 	}
+	if (state.quit)
+	    break;
 
 	// Check Content-Length
 	//
@@ -5845,9 +5848,8 @@ void RunLoop(Mailbox *mbox, Array *commands)
     if (Mailbox_IsDirty(mbox)) {
 	if (gDryRun)
 	    Note("Dry run mode -- not autosaving modified mailbox");
-	else if (gAutoWrite ||
-		 (gInteractive &&
-		  User_AskYesOrNo("Save modified mailbox?", false)))
+	else if (!gInteractive || gAutoWrite ||
+		 User_AskYesOrNo("Save modified mailbox?", false))
 	    Mailbox_Save(mbox, false, false);
     }
 }

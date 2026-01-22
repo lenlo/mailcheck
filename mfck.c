@@ -14,7 +14,6 @@
 #include <errno.h>
 #include <signal.h>
 #include <sysexits.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
 #include <math.h>
 #include <time.h>
@@ -25,6 +24,10 @@
 #include <sys/ioctl.h>
 #include <paths.h>
 #include <pwd.h>
+
+#ifdef USE_MMAP
+#  include <sys/mman.h>
+#endif
 
 #ifdef USE_READLINE
 #  include <readline/readline.h>
@@ -78,8 +81,14 @@
 
 typedef enum {false = 0, true = !false} bool;
 
-typedef enum {kString_Shared = 0, kString_Alloced, kString_Mapped,
-	      kString_Const} StringType;
+typedef enum {
+    kString_Shared = 0,
+    kString_Alloced,
+#ifdef USE_MMAP
+    kString_Mapped,
+#endif
+    kString_Const
+} StringType;
 
 #define kString_NotFound			-1
 
@@ -623,10 +632,12 @@ void String_Free(String *str)
 	    xfree(str);
 	    break;
 
+#ifdef USE_MMAP
 	  case kString_Mapped:
 	    munmap((void *) str->buf, String_Length(str));
 	    xfree(str);
 	    break;
+#endif
 
 	  case kString_Const:
 	    /* Nothing to free -- it's all static memory */
@@ -1647,6 +1658,7 @@ bool Stream_ReadContents(Stream *input, String **pContents)
     if (fstat(fd, &sbuf) == 0)
 	size = sbuf.st_size;
 
+#ifdef USE_MMAP
     // Try mapping the file if it's reasonably large
     //
     if (gMap && size >= 8192) {
@@ -1659,6 +1671,7 @@ bool Stream_ReadContents(Stream *input, String **pContents)
 	    data = NULL;
 	}
     }
+#endif
 
     if (data == NULL) {
 	int offset = 0;

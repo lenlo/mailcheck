@@ -12,14 +12,14 @@
 #
 
 OPT_DEBUG=	-O3 # -DDEBUG
-CFLAGS=		-g $(OPT_DEBUG) -Wall -DDEBUG -DUSE_READLINE # -DUSE_GC
+CFLAGS=		-g $(OPT_DEBUG) -Wall -DUSE_MMAP -DUSE_READLINE # -DUSE_GC
 LOADLIBES=	-lreadline # -lgc
 
 TARGET=		mfck
 DESTBIN=	/usr/local/bin
 
 $(TARGET):	mfck.o md5.o
-	$(CC) -o $(TARGET) mfck.o md5.o $(LOADLIBES)
+	$(CC) $(CFLAGS) -o $(TARGET) mfck.o md5.o $(LOADLIBES)
 
 mfck.c:		vers.h
 
